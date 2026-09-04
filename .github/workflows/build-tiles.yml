@@ -44,14 +44,23 @@ jobs:
           print('latest Foursquare release:', dts[-1])
           PY
 
-      - name: Extract US open places in our six categories (DuckDB reads Hugging Face directly)
+      - name: Extract US open places in our six categories (download each Hugging Face file, filter, delete)
         env:
           DT: ${{ steps.rel.outputs.dt }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          python3 -m pip install --quiet huggingface_hub
+          sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
           python3 - <<'PY'
-          import duckdb, os, time
-          dt = os.environ['DT']
-          src = f"hf://datasets/foursquare/fsq-os-places/release/dt={dt}/places/parquet/*.parquet"
+          import duckdb, os, time, sys
+          from huggingface_hub import HfApi, hf_hub_download
+          dt = os.environ['DT']; repo = 'foursquare/fsq-os-places'
+          token = os.environ.get('HF_TOKEN') or None          # optional; public dataset works without one
+          prefix = f'release/dt={dt}/places/parquet'
+          api = HfApi(token=token)
+          files = sorted(f.path for f in api.list_repo_tree(repo, repo_type='dataset', path_in_repo=prefix) if f.path.endswith('.parquet'))
+          assert files, f'no parquet files under {prefix}'
+          print(len(files), 'parquet files in release', dt)
           # The category rules MIRROR the Worker's CAT_RX / CAT_NOT — change both together.
           RX = {
             'restaurant': (r'(?i)restaurant|diner|steakhouse|pizzeria|pizza|taco|bbq|barbecue|burger|grill|bistro|eatery|food truck', None),
@@ -68,31 +77,43 @@ jobs:
             cond = f"regexp_matches(labels, {q(rx)})" + (f" AND NOT regexp_matches(labels, {q(nrx)})" if nrx else '')
             case += f"WHEN {cond} THEN '{k}' "
           case += 'END'
-          con = duckdb.connect()
-          con.execute("INSTALL httpfs; LOAD httpfs; SET threads=4; SET memory_limit='5GB'; SET preserve_insertion_order=false;")
-          t0 = time.time()
-          con.execute(f"""
-            COPY (
-              SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket
-              FROM (
+          con = duckdb.connect('/mnt/work/places.duckdb')
+          con.execute("SET threads=4; SET memory_limit='4GB'; SET preserve_insertion_order=false;")
+          con.execute("CREATE TABLE IF NOT EXISTS places (id VARCHAR, name VARCHAR, lat DOUBLE, lon DOUBLE, address VARCHAR, locality VARCHAR, region VARCHAR, postcode VARCHAR, labels VARCHAR, bucket VARCHAR)")
+          t0 = time.time(); total = 0
+          for i, path in enumerate(files):
+            local = None
+            for attempt in range(4):
+              try:
+                local = hf_hub_download(repo, filename=path, repo_type='dataset', token=token, local_dir='/mnt/work/dl'); break
+              except Exception as e:
+                print(f'  download retry {attempt+1} for {path}: {e}'); time.sleep(10 * (attempt + 1))
+            if not local: sys.exit(f'could not download {path}')
+            n = con.execute(f"""
+              INSERT INTO places
+              SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket FROM (
                 SELECT fsq_place_id AS id, name, latitude AS lat, longitude AS lon,
                        coalesce(address,'') AS address, coalesce(locality,'') AS locality,
                        coalesce(region,'') AS region, coalesce(postcode,'') AS postcode,
                        labels, {case} AS bucket
                 FROM (
                   SELECT *, array_to_string(fsq_category_labels, ' | ') AS labels
-                  FROM read_parquet({q(src)})
+                  FROM read_parquet({q(local)})
                   WHERE country = 'US' AND date_closed IS NULL AND name IS NOT NULL
                     AND latitude IS NOT NULL AND longitude IS NOT NULL
                 )
-              )
-              WHERE bucket IS NOT NULL
-            ) TO 'us.csv' (HEADER, DELIMITER ',')
-          """)
-          n = con.execute("SELECT count(*) FROM read_csv_auto('us.csv')").fetchone()[0]
-          print(f'{n} places in {time.time()-t0:.0f}s from release {dt}')
-          with open('count.txt', 'w') as f: f.write(str(n))
+              ) WHERE bucket IS NOT NULL
+            """).fetchall()
+            os.remove(local)
+            cnt = con.execute("SELECT count(*) FROM places").fetchone()[0]
+            print(f'  [{i+1}/{len(files)}] {os.path.basename(path)} → {cnt - total:,} kept (total {cnt:,}) · {time.time()-t0:.0f}s')
+            total = cnt
+          con.execute("COPY places TO 'us.csv' (HEADER, DELIMITER ',')")
+          print(f'{total:,} places kept from release {dt} in {time.time()-t0:.0f}s')
+          with open('count.txt', 'w') as f: f.write(str(total))
+          con.close()
           PY
+          rm -rf /mnt/work/dl
 
       - name: Convert to line-delimited GeoJSON
         run: |
