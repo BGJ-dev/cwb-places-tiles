@@ -1,0 +1,145 @@
+name: Build places tiles
+
+# Custom Welcome Book — nearby-places data.
+# Turns Foursquare's open places dataset (FSQ OS Places, Apache-2.0, mirrored on Hugging Face)
+# into one small map-tile file: US only, open businesses only, our six categories only.
+# Publishes it as a release asset named "tiles" that the Cloudflare Worker range-reads.
+# Runs monthly (Foursquare refreshes around the middle of each month) and on demand.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 10 16 * *'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Tools (tippecanoe from source, DuckDB)
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential libsqlite3-dev zlib1g-dev >/dev/null
+          git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+          (cd /tmp/tippecanoe && make -j"$(nproc)" >/dev/null 2>&1 && sudo make install >/dev/null)
+          python3 -m pip install --quiet duckdb
+          tippecanoe --version
+
+      - name: Find Foursquare's latest release
+        id: rel
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          url = 'https://huggingface.co/api/datasets/foursquare/fsq-os-places/tree/main/release'
+          items = json.load(urllib.request.urlopen(url))
+          dts = sorted(re.sub(r'.*dt=', '', i['path']) for i in items if i.get('type') == 'directory' and 'dt=' in i['path'])
+          assert dts, 'no dt= partitions found on Hugging Face'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f: f.write('dt=' + dts[-1] + '\n')
+          print('latest Foursquare release:', dts[-1])
+          PY
+
+      - name: Extract US open places in our six categories (DuckDB reads Hugging Face directly)
+        env:
+          DT: ${{ steps.rel.outputs.dt }}
+        run: |
+          python3 - <<'PY'
+          import duckdb, os, time
+          dt = os.environ['DT']
+          src = f"hf://datasets/foursquare/fsq-os-places/release/dt={dt}/places/parquet/*.parquet"
+          # The category rules MIRROR the Worker's CAT_RX / CAT_NOT — change both together.
+          RX = {
+            'restaurant': (r'(?i)restaurant|diner|steakhouse|pizzeria|pizza|taco|bbq|barbecue|burger|grill|bistro|eatery|food truck', None),
+            'cafe':       (r'(?i)caf[eé]|coffee|bakery|donut|doughnut|tea house|tea room|creperie|dessert|ice cream', None),
+            'grocery':    (r'(?i)grocery|supermarket|farmers market|food and beverage retail|general store|market\b', r'(?i)flea market|stock market|marketing'),
+            'winery':     (r'(?i)brewery|winery|distillery|taproom|beer garden|wine bar|\bbar\b|pub\b|cidery|meadery|lounge', r'(?i)barber|bar & grill'),
+            'park':       (r'(?i)\bpark\b|trail|playground|nature preserve|nature reserve|hiking|scenic|botanical|garden|beach|lake|waterfall|campground|national forest|state forest', r'(?i)parking|park and ride|business park|office park|industrial park|rv park|trailer park|mobile home'),
+            'museum':     (r'(?i)museum|art gallery|theater|theatre|bowling|arcade|aquarium|zoo|amusement|historic site|planetarium|science center|concert hall|performing arts', None),
+          }
+          def q(s): return "'" + s.replace("'", "''") + "'"
+          case = 'CASE '
+          for k in ['restaurant', 'cafe', 'grocery', 'winery', 'park', 'museum']:
+            rx, nrx = RX[k]
+            cond = f"regexp_matches(labels, {q(rx)})" + (f" AND NOT regexp_matches(labels, {q(nrx)})" if nrx else '')
+            case += f"WHEN {cond} THEN '{k}' "
+          case += 'END'
+          con = duckdb.connect()
+          con.execute("INSTALL httpfs; LOAD httpfs; SET threads=4; SET memory_limit='5GB'; SET preserve_insertion_order=false;")
+          t0 = time.time()
+          con.execute(f"""
+            COPY (
+              SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket
+              FROM (
+                SELECT fsq_place_id AS id, name, latitude AS lat, longitude AS lon,
+                       coalesce(address,'') AS address, coalesce(locality,'') AS locality,
+                       coalesce(region,'') AS region, coalesce(postcode,'') AS postcode,
+                       labels, {case} AS bucket
+                FROM (
+                  SELECT *, array_to_string(fsq_category_labels, ' | ') AS labels
+                  FROM read_parquet({q(src)})
+                  WHERE country = 'US' AND date_closed IS NULL AND name IS NOT NULL
+                    AND latitude IS NOT NULL AND longitude IS NOT NULL
+                )
+              )
+              WHERE bucket IS NOT NULL
+            ) TO 'us.csv' (HEADER, DELIMITER ',')
+          """)
+          n = con.execute("SELECT count(*) FROM read_csv_auto('us.csv')").fetchone()[0]
+          print(f'{n} places in {time.time()-t0:.0f}s from release {dt}')
+          with open('count.txt', 'w') as f: f.write(str(n))
+          PY
+
+      - name: Convert to line-delimited GeoJSON
+        run: |
+          python3 - <<'PY'
+          import csv, json, sys
+          csv.field_size_limit(1 << 24)
+          n = 0
+          with open('us.csv', newline='', encoding='utf-8') as f, open('us.geojsonseq', 'w', encoding='utf-8') as out:
+            for row in csv.DictReader(f):
+              try: lat, lon = float(row['lat']), float(row['lon'])
+              except: continue
+              props = {k: row[k] for k in ('name', 'address', 'locality', 'region', 'postcode', 'labels', 'bucket', 'id') if row.get(k)}
+              out.write(json.dumps({'type': 'Feature', 'properties': props, 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}}, ensure_ascii=False) + '\n')
+              n += 1
+          print(n, 'features written')
+          PY
+          rm -f us.csv
+
+      - name: Build the tile file (z12 = everything; z10–11 = destinations only for wide searches)
+        run: |
+          set -e
+          tippecanoe -o fsq-us.pmtiles -l place -n "Custom Welcome Book places" \
+            -Z10 -z12 -r1 --no-feature-limit --no-tile-size-limit \
+            -j '{"place":["any",[">=","$zoom",12],["in","bucket","park","museum","winery"]]}' \
+            -P --force us.geojsonseq
+          ls -la fsq-us.pmtiles
+          rm -f us.geojsonseq
+
+      - name: Manifest
+        env:
+          DT: ${{ steps.rel.outputs.dt }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time
+          json.dump({'source': 'Foursquare OS Places (Apache-2.0) via huggingface.co/datasets/foursquare/fsq-os-places',
+                     'release': os.environ['DT'], 'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                     'features': int(open('count.txt').read()), 'bytes': os.path.getsize('fsq-us.pmtiles'),
+                     'zooms': {'12': 'all six categories', '10-11': 'park, museum, winery only'}},
+                    open('manifest.json', 'w'), indent=2)
+          print(open('manifest.json').read())
+          PY
+
+      - name: Publish as the "tiles" release (overwrites the previous file)
+        run: |
+          set -e
+          gh release view tiles --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create tiles --repo "$GITHUB_REPOSITORY" --title "Places tiles" \
+              --notes "Nearby-places tile file for Custom Welcome Book. Contains data from Foursquare OS Places (Apache License 2.0). Rebuilt monthly."
+          gh release upload tiles fsq-us.pmtiles manifest.json --repo "$GITHUB_REPOSITORY" --clobber
+          echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/fsq-us.pmtiles"
