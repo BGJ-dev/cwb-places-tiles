@@ -92,37 +92,44 @@ jobs:
 
           def q(s): return "'" + s.replace("'", "''") + "'"
 
-          def classify_sql(src_sql):
+          def classify_sql(src_sql, cols=None):
               """One SELECT over a source relation with the FSQ OS Places schema → candidate rows with
-                 bucket + rejection reason. Primary label decides the bucket; ANY label can reject."""
+                 bucket + rejection reason. Primary label decides the bucket; ANY label can reject.
+                 `cols` = the file's actual column names: optional columns that are absent become NULL and
+                 every optional column is read as text, so a schema drift never breaks the build."""
               P = RULES['primary']
+              have = set(cols) if cols else None
+              def txt(c):   # optional text column → VARCHAR expression
+                  return f"CAST({c} AS VARCHAR)" if (have is None or c in have) else "NULL::VARCHAR"
+              def dat(c):   # optional date column → DATE expression
+                  return f"TRY_CAST({c} AS DATE)" if (have is None or c in have) else "NULL::DATE"
               case = 'CASE '
               for k in ['restaurant', 'cafe', 'grocery', 'winery', 'park', 'museum']:
                   case += f"WHEN regexp_matches(prim, {q(P[k])}) THEN '{k}' "
               case += 'END'
               return f"""
-                SELECT fsq_place_id AS id, name, latitude AS lat, longitude AS lon,
-                       coalesce(address,'') AS address, coalesce(locality,'') AS locality,
-                       coalesce(region,'') AS region, coalesce(postcode,'') AS postcode,
+                SELECT CAST(fsq_place_id AS VARCHAR) AS id, CAST(name AS VARCHAR) AS name, CAST(latitude AS DOUBLE) AS lat, CAST(longitude AS DOUBLE) AS lon,
+                       coalesce({txt('address')},'') AS address, coalesce({txt('locality')},'') AS locality,
+                       coalesce({txt('region')},'') AS region, coalesce({txt('postcode')},'') AS postcode,
                        labels, prim, bucket,
                        CASE
                          WHEN regexp_matches(labels, {q(RULES['reject_any_label'])}) THEN 'label'
                          WHEN regexp_matches(name, {q(RULES['reject_name'])}) THEN 'name'
                          WHEN length(trim(name)) < 3 OR regexp_matches(name, '^[0-9 ()+.-]+$') THEN 'junk-name'
                          WHEN bucket = 'grocery' AND regexp_matches(prim, '^Retail > Big Box Store') AND NOT regexp_matches(labels, {q(RULES['grocery_bigbox_needs'])}) THEN 'bigbox-not-grocery'
-                         WHEN TRY_CAST(date_refreshed AS DATE) < DATE {q(RULES['stale_before'])} THEN 'stale'
+                         WHEN {dat('date_refreshed')} < DATE {q(RULES['stale_before'])} THEN 'stale'
                          ELSE NULL
                        END AS rej,
-                       (CASE WHEN length(trim(coalesce(address,''))) > 0 AND coalesce(po_box,'') = '' THEN {RULES['score']['address']} ELSE 0 END
-                        + CASE WHEN coalesce(tel,'') <> '' THEN {RULES['score']['tel']} ELSE 0 END
-                        + CASE WHEN coalesce(website,'') <> '' THEN {RULES['score']['website']} ELSE 0 END
-                        + CASE WHEN coalesce(instagram,'') <> '' OR coalesce(facebook_id,'') <> '' OR coalesce(twitter,'') <> '' OR coalesce(email,'') <> '' THEN {RULES['score']['social']} ELSE 0 END
-                        + CASE WHEN TRY_CAST(date_refreshed AS DATE) >= DATE '2024-01-01' THEN {RULES['score']['refreshed_since_2024']} ELSE 0 END
-                        + CASE WHEN TRY_CAST(date_refreshed AS DATE) >= DATE '2025-06-01' THEN {RULES['score']['refreshed_since_2025_06']} ELSE 0 END
+                       (CASE WHEN length(trim(coalesce({txt('address')},''))) > 0 AND coalesce({txt('po_box')},'') = '' THEN {RULES['score']['address']} ELSE 0 END
+                        + CASE WHEN coalesce({txt('tel')},'') <> '' THEN {RULES['score']['tel']} ELSE 0 END
+                        + CASE WHEN coalesce({txt('website')},'') <> '' THEN {RULES['score']['website']} ELSE 0 END
+                        + CASE WHEN coalesce({txt('instagram')},'') <> '' OR coalesce({txt('facebook_id')},'') <> '' OR coalesce({txt('twitter')},'') <> '' OR coalesce({txt('email')},'') <> '' THEN {RULES['score']['social']} ELSE 0 END
+                        + CASE WHEN {dat('date_refreshed')} >= DATE '2024-01-01' THEN {RULES['score']['refreshed_since_2024']} ELSE 0 END
+                        + CASE WHEN {dat('date_refreshed')} >= DATE '2025-06-01' THEN {RULES['score']['refreshed_since_2025_06']} ELSE 0 END
                         + CASE WHEN regexp_matches(name, {q(RULES['chains'])}) THEN {RULES['score']['chain_penalty']} ELSE 0 END
                         + CASE WHEN labels LIKE {q('%' + RULES['fast_food_label'] + '%')} THEN {RULES['score']['fast_food_penalty']} ELSE 0 END) AS q_raw,
                        CASE WHEN regexp_matches(name, {q(RULES['chains'])}) THEN 1 ELSE 0 END AS chain,
-                       year(TRY_CAST(date_refreshed AS DATE)) AS ry
+                       year({dat('date_refreshed')}) AS ry
                 FROM (
                   SELECT *, array_to_string(fsq_category_labels, ' | ') AS labels,
                          coalesce(fsq_category_labels[1], '') AS prim,
@@ -138,10 +145,17 @@ jobs:
               con = duckdb.connect(os.path.join(workdir, 'places.duckdb'))
               con.execute("SET threads=4; SET memory_limit='4GB'; SET preserve_insertion_order=false;")
               con.execute("CREATE OR REPLACE TABLE cand (id VARCHAR, name VARCHAR, lat DOUBLE, lon DOUBLE, address VARCHAR, locality VARCHAR, region VARCHAR, postcode VARCHAR, labels VARCHAR, prim VARCHAR, bucket VARCHAR, rej VARCHAR, q_raw INTEGER, chain INTEGER, ry INTEGER)")
-              t0 = time.time()
+              t0 = time.time(); cols = None
               for i, path in enumerate(files):
                   local = download(path) if download else path
-                  con.execute("INSERT INTO cand " + classify_sql(f"SELECT * FROM read_parquet({q(local)})"))
+                  if cols is None:
+                      cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(local)})").fetchall()]
+                      print('schema of the first file:', ', '.join(cols), flush=True)
+                      for need in ('fsq_place_id', 'name', 'latitude', 'longitude', 'country', 'date_closed', 'fsq_category_labels'):
+                          assert need in cols, f'required column missing: {need}'
+                      missing = [c for c in ('address', 'locality', 'region', 'postcode', 'po_box', 'tel', 'website', 'email', 'instagram', 'facebook_id', 'twitter', 'date_refreshed') if c not in cols]
+                      if missing: print('optional columns absent in this release (treated as empty):', ', '.join(missing), flush=True)
+                  con.execute("INSERT INTO cand " + classify_sql(f"SELECT * FROM read_parquet({q(local)})", cols))
                   if download: os.remove(local)
                   n = con.execute("SELECT count(*) FROM cand").fetchone()[0]
                   print(f'  [{i+1}/{len(files)}] {os.path.basename(path)} → candidates so far {n:,} · {time.time()-t0:.0f}s', flush=True)
@@ -155,6 +169,13 @@ jobs:
                   print('  ', row)
               print('\n== sample of rejected rows (reason · bucket · name · primary label)')
               for row in con.execute("SELECT rej, bucket, name, prim FROM cand WHERE rej IS NOT NULL USING SAMPLE 40 ROWS").fetchall():
+                  print('  ', row)
+              # the staleness question (is the floor 5 years or 2?): how many venue rows Foursquare last refreshed in each year,
+              # counting the ones the floor rejected too, so the floor can be moved with numbers instead of guesses
+              print('\n== last refreshed, by year (venue-type rows only; "stale" = below the floor) · year · rows · of which stale')
+              for row in con.execute("""
+                  SELECT coalesce(ry, 0) AS year, count(*) AS rows, count(*) FILTER (WHERE rej='stale') AS stale
+                  FROM cand WHERE rej IS NULL OR rej='stale' GROUP BY 1 ORDER BY 1""").fetchall():
                   print('  ', row)
               # --- final table: kept rows, score clamped 0..6, duplicates collapsed ---
               g = RULES['dedupe_grid_deg']
