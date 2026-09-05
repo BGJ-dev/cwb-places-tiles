@@ -4,6 +4,9 @@ name: Build places tiles
 # Turns Foursquare's open places dataset (FSQ OS Places, Apache-2.0, mirrored on Hugging Face)
 # into one small map-tile file: US only, open businesses only, our six categories only.
 # Publishes it as a release asset named "tiles" that the Cloudflare Worker range-reads.
+# v3 (2026-09-05): data-quality rules — primary-label whitelists, office/service rejection, name rules,
+# a staleness floor, a 0–6 quality score, duplicate collapse, and a printed rejection report.
+# The rules JSON inside MIRRORS the Worker's RULES — change both, run the mirror check.
 # Runs monthly (Foursquare refreshes around the middle of each month) and on demand.
 
 on:
@@ -44,7 +47,7 @@ jobs:
           print('latest Foursquare release:', dts[-1])
           PY
 
-      - name: Extract US open places in our six categories (download each Hugging Face file, filter, delete)
+      - name: Extract US open places in our six categories — data quality v3 (download each file, classify, score, dedupe)
         env:
           DT: ${{ steps.rel.outputs.dt }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -52,69 +55,149 @@ jobs:
           python3 -m pip install --quiet huggingface_hub
           sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
           python3 - <<'PY'
-          import duckdb, os, time, sys
+          # Custom Welcome Book — places file build, extract step v3 (data quality).
+          # Runs inside the GitHub Actions job (see build-tiles.yml). Also runnable locally against any
+          # parquet files for validation:  python3 extract_v3.py --files a.parquet b.parquet --out ./work
+          import duckdb, os, sys, time, json, argparse
+
+          RULES = json.loads(r'''{
+            "version": 3,
+            "note": "THE category rules for the places file. Used verbatim by the build job (DuckDB, RE2 syntax) and the Worker (JS). Change here, then run the mirror check. stale_before: a record Foursquare has not refreshed since this date is left out (closed-for-years places rarely get refreshed).",
+            "primary": {
+              "restaurant": "^Dining and Drinking > Restaurant",
+              "cafe": "^Dining and Drinking > (Cafe, Coffee, and Tea House|Bakery|Dessert Shop|Donut Shop|Creperie|Bagel Shop)",
+              "grocery": "^Retail > (Food and Beverage Retail > (Grocery Store|Supermarket|Farmers Market|Health Food Store|Butcher|Fish Market|Cheese Store|Gourmet Store|Organic Grocery|Meat and Seafood|Fruit and Vegetable Store)|Big Box Store)",
+              "winery": "^Dining and Drinking > (Winery|Brewery|Distillery|Bar( > (Wine Bar|Beer Bar|Cocktail Bar|Pub|Irish Pub|Sports Bar|Dive Bar|Beer Garden|Speakeasy|Whisky Bar|Rooftop Bar|Piano Bar|Tiki Bar|Hotel Bar|Lounge|Gastropub|Taproom))?$)",
+              "park": "^Landmarks and Outdoors > (Park|Beach|Scenic Lookout|Hiking Trail|Trail|Bike Trail|Nature Preserve|Nature Reserve|Lake|Waterfall|Garden|Botanical Garden|Sculpture Garden|Forest|Mountain|River|Reservoir|Canyon|Cave|Hot Spring|Island|Bay|Harbor|Marina|Dog Park|Playground|Picnic Area|State Park|National Park|Wildlife|Other Great Outdoors)",
+              "museum": "^(Arts and Entertainment > (Museum|Art Gallery|Performing Arts Venue|Movie Theater|Arcade|Bowling Alley|Zoo|Aquarium|Amusement Park|Water Park|Mini Golf Course|Planetarium|Science Museum|History Museum|Art Museum|Exhibit|Public Art)|Landmarks and Outdoors > (Historic and Protected Site|Monument|Landmark|Historic Site))"
+            },
+            "reject_any_label": "(Business and Professional Services|Health and Medicine|Travel and Transportation > (Lodging|Fuel Station|Travel Lounge|Transportation)|Retail > (Home Improvement|Automotive|Furniture and Home|Garden Center|Pet)|Community and Government > (Education|Government|Organization|Religious|Military)|Sports and Recreation > (Gym|Fitness|Athletic)|Event > |Office|Home Service|Event Space|Consult|Real Estate|Landscap|Food Truck|Cafeteria|Gaming Cafe|Internet Cafe|College|Night Club|Strip Club|Adult|Hookah|Vape|Smoke Shop)",
+            "reject_name": "(?i)\\b(at home|mobile|delivery only|catering|caterers?|concierge|consult(ing|ants?)|services?|llc|inc\\.?|ltd\\.?|corp\\.?|enterprises|solutions|wholesale|distribut(or|ion)|vending|permanently closed|closed)\\b",
+            "grocery_bigbox_needs": "(Supermarket|Grocery Store)",
+            "chains": "(?i)^(mcdonald|subway|sonic drive|whataburger|starbucks|walmart|dollar general|domino|pizza hut|taco bell|wendy|burger king|chick-fil-a|dunkin|kfc|popeyes|arby|jack in the box|little caesars|papa john|chipotle|panda express|waffle house|ihop|denny|cracker barrel|applebee|chili's|olive garden|dairy queen|wingstop|zaxby|culver|in-n-out|five guys|jimmy john|jersey mike|firehouse subs|panera|dutch bros|7-eleven|circle k|walgreens|cvs|taco cabana|bill miller|raising cane|church's|carl's jr|hardee|long john silver|schlotzsky|cicis|golden corral|red lobster|texas roadhouse|outback|buffalo wild wings|hooters|twin peaks|dave & buster|main event|sam's club|costco|h-e-b plus)",
+            "fast_food_label": "Fast Food Restaurant",
+            "score": {
+              "address": 1,
+              "tel": 1,
+              "website": 1,
+              "social": 1,
+              "refreshed_since_2024": 1,
+              "refreshed_since_2025_06": 1,
+              "chain_penalty": -2,
+              "fast_food_penalty": -1
+            },
+            "dedupe_grid_deg": 0.003,
+            "stale_before": "2021-01-01"
+          }''')
+
+          def q(s): return "'" + s.replace("'", "''") + "'"
+
+          def classify_sql(src_sql):
+              """One SELECT over a source relation with the FSQ OS Places schema → candidate rows with
+                 bucket + rejection reason. Primary label decides the bucket; ANY label can reject."""
+              P = RULES['primary']
+              case = 'CASE '
+              for k in ['restaurant', 'cafe', 'grocery', 'winery', 'park', 'museum']:
+                  case += f"WHEN regexp_matches(prim, {q(P[k])}) THEN '{k}' "
+              case += 'END'
+              return f"""
+                SELECT fsq_place_id AS id, name, latitude AS lat, longitude AS lon,
+                       coalesce(address,'') AS address, coalesce(locality,'') AS locality,
+                       coalesce(region,'') AS region, coalesce(postcode,'') AS postcode,
+                       labels, prim, bucket,
+                       CASE
+                         WHEN regexp_matches(labels, {q(RULES['reject_any_label'])}) THEN 'label'
+                         WHEN regexp_matches(name, {q(RULES['reject_name'])}) THEN 'name'
+                         WHEN length(trim(name)) < 3 OR regexp_matches(name, '^[0-9 ()+.-]+$') THEN 'junk-name'
+                         WHEN bucket = 'grocery' AND regexp_matches(prim, '^Retail > Big Box Store') AND NOT regexp_matches(labels, {q(RULES['grocery_bigbox_needs'])}) THEN 'bigbox-not-grocery'
+                         WHEN TRY_CAST(date_refreshed AS DATE) < DATE {q(RULES['stale_before'])} THEN 'stale'
+                         ELSE NULL
+                       END AS rej,
+                       (CASE WHEN length(trim(coalesce(address,''))) > 0 AND coalesce(po_box,'') = '' THEN {RULES['score']['address']} ELSE 0 END
+                        + CASE WHEN coalesce(tel,'') <> '' THEN {RULES['score']['tel']} ELSE 0 END
+                        + CASE WHEN coalesce(website,'') <> '' THEN {RULES['score']['website']} ELSE 0 END
+                        + CASE WHEN coalesce(instagram,'') <> '' OR coalesce(facebook_id,'') <> '' OR coalesce(twitter,'') <> '' OR coalesce(email,'') <> '' THEN {RULES['score']['social']} ELSE 0 END
+                        + CASE WHEN TRY_CAST(date_refreshed AS DATE) >= DATE '2024-01-01' THEN {RULES['score']['refreshed_since_2024']} ELSE 0 END
+                        + CASE WHEN TRY_CAST(date_refreshed AS DATE) >= DATE '2025-06-01' THEN {RULES['score']['refreshed_since_2025_06']} ELSE 0 END
+                        + CASE WHEN regexp_matches(name, {q(RULES['chains'])}) THEN {RULES['score']['chain_penalty']} ELSE 0 END
+                        + CASE WHEN labels LIKE {q('%' + RULES['fast_food_label'] + '%')} THEN {RULES['score']['fast_food_penalty']} ELSE 0 END) AS q_raw,
+                       CASE WHEN regexp_matches(name, {q(RULES['chains'])}) THEN 1 ELSE 0 END AS chain,
+                       year(TRY_CAST(date_refreshed AS DATE)) AS ry
+                FROM (
+                  SELECT *, array_to_string(fsq_category_labels, ' | ') AS labels,
+                         coalesce(fsq_category_labels[1], '') AS prim,
+                         {case} AS bucket
+                  FROM ({src_sql})
+                  WHERE country = 'US' AND date_closed IS NULL AND name IS NOT NULL
+                    AND latitude IS NOT NULL AND longitude IS NOT NULL
+                ) WHERE bucket IS NOT NULL
+              """
+
+          def run(files, workdir, download=None, token=None):
+              os.makedirs(workdir, exist_ok=True)
+              con = duckdb.connect(os.path.join(workdir, 'places.duckdb'))
+              con.execute("SET threads=4; SET memory_limit='4GB'; SET preserve_insertion_order=false;")
+              con.execute("CREATE OR REPLACE TABLE cand (id VARCHAR, name VARCHAR, lat DOUBLE, lon DOUBLE, address VARCHAR, locality VARCHAR, region VARCHAR, postcode VARCHAR, labels VARCHAR, prim VARCHAR, bucket VARCHAR, rej VARCHAR, q_raw INTEGER, chain INTEGER, ry INTEGER)")
+              t0 = time.time()
+              for i, path in enumerate(files):
+                  local = download(path) if download else path
+                  con.execute("INSERT INTO cand " + classify_sql(f"SELECT * FROM read_parquet({q(local)})"))
+                  if download: os.remove(local)
+                  n = con.execute("SELECT count(*) FROM cand").fetchone()[0]
+                  print(f'  [{i+1}/{len(files)}] {os.path.basename(path)} → candidates so far {n:,} · {time.time()-t0:.0f}s', flush=True)
+              # --- the report: what the rules did ---
+              print('\n== candidates by bucket: kept / rejected (label · name · junk · bigbox · stale)')
+              for row in con.execute("""
+                  SELECT bucket, count(*) FILTER (WHERE rej IS NULL) AS kept,
+                         count(*) FILTER (WHERE rej='label') AS r_label, count(*) FILTER (WHERE rej='name') AS r_name,
+                         count(*) FILTER (WHERE rej='junk-name') AS r_junk, count(*) FILTER (WHERE rej='bigbox-not-grocery') AS r_bb, count(*) FILTER (WHERE rej='stale') AS r_stale
+                  FROM cand GROUP BY bucket ORDER BY bucket""").fetchall():
+                  print('  ', row)
+              print('\n== sample of rejected rows (reason · bucket · name · primary label)')
+              for row in con.execute("SELECT rej, bucket, name, prim FROM cand WHERE rej IS NOT NULL USING SAMPLE 40 ROWS").fetchall():
+                  print('  ', row)
+              # --- final table: kept rows, score clamped 0..6, duplicates collapsed ---
+              g = RULES['dedupe_grid_deg']
+              con.execute(f"""
+                CREATE OR REPLACE TABLE places AS
+                SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket,
+                       greatest(0, least(6, q_raw)) AS q, chain, ry
+                FROM (
+                  SELECT *, row_number() OVER (
+                           PARTITION BY bucket, nname, round(lat / {g}), round(lon / {g})
+                           ORDER BY q_raw DESC, coalesce(ry, 0) DESC, length(address) DESC) AS rn
+                  FROM (
+                    SELECT *, regexp_replace(regexp_replace(regexp_replace(lower(name), '(bar[ -]?b[ -]?que|barbe?que|barbecue|bbq)', 'bbq', 'g'), '\\b(the|and|&|of|at|a|an)\\b', '', 'g'), '[^a-z0-9]', '', 'g') AS nname
+                    FROM cand WHERE rej IS NULL
+                  )
+                ) WHERE rn = 1
+              """)
+              total = con.execute("SELECT count(*) FROM places").fetchone()[0]
+              dups = con.execute("SELECT count(*) FROM cand WHERE rej IS NULL").fetchone()[0] - total
+              print(f'\n== kept {total:,} places · {dups:,} duplicates collapsed · {time.time()-t0:.0f}s')
+              print('== score distribution (q → places)')
+              for row in con.execute("SELECT q, count(*) FROM places GROUP BY q ORDER BY q").fetchall(): print('  ', row)
+              con.execute(f"COPY places TO {q(os.path.join(workdir, 'us.csv'))} (HEADER, DELIMITER ',')")
+              with open(os.path.join(workdir, 'count.txt'), 'w') as f: f.write(str(total))
+              con.close()
+              return total
+
           from huggingface_hub import HfApi, hf_hub_download
           dt = os.environ['DT']; repo = 'foursquare/fsq-os-places'
-          token = os.environ.get('HF_TOKEN') or None          # optional; public dataset works without one
+          token = os.environ.get('HF_TOKEN') or None
           prefix = f'release/dt={dt}/places/parquet'
           api = HfApi(token=token)
           files = sorted(f.path for f in api.list_repo_tree(repo, repo_type='dataset', path_in_repo=prefix) if f.path.endswith('.parquet'))
           assert files, f'no parquet files under {prefix}'
           print(len(files), 'parquet files in release', dt)
-          # The category rules MIRROR the Worker's CAT_RX / CAT_NOT — change both together.
-          # v2 tune (2026-09-05, from the first real file): food trucks and cafeterias out, landscapers /
-          # garden centers and "campground"-tagged rental cabins out of park, juice bars and airport
-          # lounges out of winery, college venues out of museum. MIRRORS the Worker's CAT_RX / CAT_NOT.
-          RX = {
-            'restaurant': (r'(?i)restaurant|diner|steakhouse|pizzeria|pizza|taco|bbq|barbecue|burger|grill|bistro|eatery', r'(?i)food truck|cafeteria'),
-            'cafe':       (r'(?i)caf[eé]|coffee|bakery|donut|doughnut|tea house|tea room|creperie|dessert|ice cream', r'(?i)cafeteria|gaming cafe|internet cafe|fuel station'),
-            'grocery':    (r'(?i)grocery|supermarket|farmers market|food and beverage retail|general store|market\b', r'(?i)flea market|stock market|marketing'),
-            'winery':     (r'(?i)brewery|winery|distillery|taproom|beer garden|wine bar|\bbar\b|pub\b|cidery|meadery|lounge', r'(?i)barber|bar & grill|juice bar|travel lounge|airport'),
-            'park':       (r'(?i)\bpark\b|trail|playground|nature preserve|nature reserve|hiking|scenic|botanical|\bgarden\b|beach|lake|waterfall|national forest|state forest', r'(?i)parking|park and ride|business park|office park|industrial park|rv park|trailer park|mobile home|landscap|gardener|garden center|nursery'),
-            'museum':     (r'(?i)museum|art gallery|theater|theatre|bowling|arcade|aquarium|zoo|amusement|historic site|planetarium|science center|concert hall|performing arts', r'(?i)college'),
-          }
-          def q(s): return "'" + s.replace("'", "''") + "'"
-          case = 'CASE '
-          for k in ['restaurant', 'cafe', 'grocery', 'winery', 'park', 'museum']:
-            rx, nrx = RX[k]
-            cond = f"regexp_matches(labels, {q(rx)})" + (f" AND NOT regexp_matches(labels, {q(nrx)})" if nrx else '')
-            case += f"WHEN {cond} THEN '{k}' "
-          case += 'END'
-          con = duckdb.connect('/mnt/work/places.duckdb')
-          con.execute("SET threads=4; SET memory_limit='4GB'; SET preserve_insertion_order=false;")
-          con.execute("CREATE TABLE IF NOT EXISTS places (id VARCHAR, name VARCHAR, lat DOUBLE, lon DOUBLE, address VARCHAR, locality VARCHAR, region VARCHAR, postcode VARCHAR, labels VARCHAR, bucket VARCHAR)")
-          t0 = time.time(); total = 0
-          for i, path in enumerate(files):
-            local = None
-            for attempt in range(4):
-              try:
-                local = hf_hub_download(repo, filename=path, repo_type='dataset', token=token, local_dir='/mnt/work/dl'); break
-              except Exception as e:
-                print(f'  download retry {attempt+1} for {path}: {e}'); time.sleep(10 * (attempt + 1))
-            if not local: sys.exit(f'could not download {path}')
-            n = con.execute(f"""
-              INSERT INTO places
-              SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket FROM (
-                SELECT fsq_place_id AS id, name, latitude AS lat, longitude AS lon,
-                       coalesce(address,'') AS address, coalesce(locality,'') AS locality,
-                       coalesce(region,'') AS region, coalesce(postcode,'') AS postcode,
-                       labels, {case} AS bucket
-                FROM (
-                  SELECT *, array_to_string(fsq_category_labels, ' | ') AS labels
-                  FROM read_parquet({q(local)})
-                  WHERE country = 'US' AND date_closed IS NULL AND name IS NOT NULL
-                    AND latitude IS NOT NULL AND longitude IS NOT NULL
-                )
-              ) WHERE bucket IS NOT NULL
-            """).fetchall()
-            os.remove(local)
-            cnt = con.execute("SELECT count(*) FROM places").fetchone()[0]
-            print(f'  [{i+1}/{len(files)}] {os.path.basename(path)} → {cnt - total:,} kept (total {cnt:,}) · {time.time()-t0:.0f}s')
-            total = cnt
-          con.execute("COPY places TO 'us.csv' (HEADER, DELIMITER ',')")
-          print(f'{total:,} places kept from release {dt} in {time.time()-t0:.0f}s')
-          with open('count.txt', 'w') as f: f.write(str(total))
-          con.close()
+          def download(path):
+              for attempt in range(4):
+                  try: return hf_hub_download(repo, filename=path, repo_type='dataset', token=token, local_dir='/mnt/work/dl')
+                  except Exception as e: print(f'  download retry {attempt+1} for {path}: {e}'); time.sleep(10 * (attempt + 1))
+              sys.exit(f'could not download {path}')
+          total = run(files, '/mnt/work', download=download)
+          import shutil; shutil.copy('/mnt/work/us.csv', 'us.csv'); shutil.copy('/mnt/work/count.txt', 'count.txt')
+          print(f'{total:,} places kept from release {dt}')
           PY
           rm -rf /mnt/work/dl
 
@@ -129,6 +212,9 @@ jobs:
               try: lat, lon = float(row['lat']), float(row['lon'])
               except: continue
               props = {k: row[k] for k in ('name', 'address', 'locality', 'region', 'postcode', 'labels', 'bucket', 'id') if row.get(k)}
+              for k in ('q', 'chain', 'ry'):
+                try: props[k] = int(row[k])
+                except: pass
               out.write(json.dumps({'type': 'Feature', 'properties': props, 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}}, ensure_ascii=False) + '\n')
               n += 1
           print(n, 'features written')
@@ -154,7 +240,7 @@ jobs:
           json.dump({'source': 'Foursquare OS Places (Apache-2.0) via huggingface.co/datasets/foursquare/fsq-os-places',
                      'release': os.environ['DT'], 'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                      'features': int(open('count.txt').read()), 'bytes': os.path.getsize('fsq-us.pmtiles'),
-                     'zooms': {'12': 'all six categories', '10-11': 'park, museum, winery only'}},
+                     'rules': 3, 'zooms': {'12': 'all six categories', '10-11': 'park, museum, winery only'}},
                     open('manifest.json', 'w'), indent=2)
           print(open('manifest.json').read())
           PY
