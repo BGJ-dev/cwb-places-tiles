@@ -62,13 +62,16 @@ jobs:
           assert files, f'no parquet files under {prefix}'
           print(len(files), 'parquet files in release', dt)
           # The category rules MIRROR the Worker's CAT_RX / CAT_NOT — change both together.
+          # v2 tune (2026-09-05, from the first real file): food trucks and cafeterias out, landscapers /
+          # garden centers and "campground"-tagged rental cabins out of park, juice bars and airport
+          # lounges out of winery, college venues out of museum. MIRRORS the Worker's CAT_RX / CAT_NOT.
           RX = {
-            'restaurant': (r'(?i)restaurant|diner|steakhouse|pizzeria|pizza|taco|bbq|barbecue|burger|grill|bistro|eatery|food truck', None),
-            'cafe':       (r'(?i)caf[eé]|coffee|bakery|donut|doughnut|tea house|tea room|creperie|dessert|ice cream', None),
+            'restaurant': (r'(?i)restaurant|diner|steakhouse|pizzeria|pizza|taco|bbq|barbecue|burger|grill|bistro|eatery', r'(?i)food truck|cafeteria'),
+            'cafe':       (r'(?i)caf[eé]|coffee|bakery|donut|doughnut|tea house|tea room|creperie|dessert|ice cream', r'(?i)cafeteria|gaming cafe|internet cafe|fuel station'),
             'grocery':    (r'(?i)grocery|supermarket|farmers market|food and beverage retail|general store|market\b', r'(?i)flea market|stock market|marketing'),
-            'winery':     (r'(?i)brewery|winery|distillery|taproom|beer garden|wine bar|\bbar\b|pub\b|cidery|meadery|lounge', r'(?i)barber|bar & grill'),
-            'park':       (r'(?i)\bpark\b|trail|playground|nature preserve|nature reserve|hiking|scenic|botanical|garden|beach|lake|waterfall|campground|national forest|state forest', r'(?i)parking|park and ride|business park|office park|industrial park|rv park|trailer park|mobile home'),
-            'museum':     (r'(?i)museum|art gallery|theater|theatre|bowling|arcade|aquarium|zoo|amusement|historic site|planetarium|science center|concert hall|performing arts', None),
+            'winery':     (r'(?i)brewery|winery|distillery|taproom|beer garden|wine bar|\bbar\b|pub\b|cidery|meadery|lounge', r'(?i)barber|bar & grill|juice bar|travel lounge|airport'),
+            'park':       (r'(?i)\bpark\b|trail|playground|nature preserve|nature reserve|hiking|scenic|botanical|\bgarden\b|beach|lake|waterfall|national forest|state forest', r'(?i)parking|park and ride|business park|office park|industrial park|rv park|trailer park|mobile home|landscap|gardener|garden center|nursery'),
+            'museum':     (r'(?i)museum|art gallery|theater|theatre|bowling|arcade|aquarium|zoo|amusement|historic site|planetarium|science center|concert hall|performing arts', r'(?i)college'),
           }
           def q(s): return "'" + s.replace("'", "''") + "'"
           case = 'CASE '
