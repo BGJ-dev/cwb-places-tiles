@@ -1,0 +1,124 @@
+name: Destinations update
+
+# Custom Welcome Book — famous places ("destinations") from Wikidata, the free source of fame.
+# For each kind of place a guest plans a day around (national parks, waterfalls, zoos, museums, historic
+# sites, wineries…) this asks Wikidata for every item in the United States with coordinates and counts how
+# many language Wikipedias write about it (sitelinks) — Disneyland ~90, Yosemite ~150, a county park 0.
+# Output: us-destinations.csv on the "tiles" release. The places build ("Build places tiles") merges it as
+# the destination bucket, so the seeder can offer a famous place an hour away. Wikidata is CC0.
+# Runs monthly two days before the places build, and on demand. ~10–20 minutes; polite to the endpoint
+# (one query at a time, a pause between, retries with backoff).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 10 14 * *'
+
+permissions:
+  contents: write
+
+jobs:
+  destinations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Ask Wikidata, kind by kind
+        run: |
+          python3 - <<'PY'
+          import json, time, urllib.request, urllib.parse, csv, sys, re
+          UA = 'CustomWelcomeBook-destinations/1.0 (STR welcome books; github.com/BGJ-dev/cwb-places-tiles)'
+          ENDPOINT = 'https://query.wikidata.org/sparql'
+          # kind label → Wikidata classes (direct instance-of); '*' after a QID also walks subclasses (P279*)
+          KINDS = [
+            ('National Park',        ['Q46169']),
+            ('State Park',           ['Q1140471', 'Q1216927']),
+            ('National Monument',    ['Q893485']),
+            ('National Forest',      ['Q1073855']),
+            ('Nature Preserve',      ['Q179049', 'Q1310307']),
+            ('Waterfall',            ['Q34038']),
+            ('Beach',                ['Q40080']),
+            ('Lake',                 ['Q23397']),
+            ('Cave',                 ['Q35509']),
+            ('Hot Spring',           ['Q177380']),
+            ('Canyon',               ['Q150784']),
+            ('Mountain',             ['Q8502']),
+            ('Scenic Lookout',       ['Q1440300', 'Q6017969']),
+            ('Botanical Garden',     ['Q167346']),
+            ('Zoo',                  ['Q43501']),
+            ('Aquarium',             ['Q2281788']),
+            ('Amusement Park',       ['Q194195', 'Q3467128']),
+            ('Museum',               ['Q33506*']),
+            ('Historic Site',        ['Q1081138', 'Q839954', 'Q23413']),
+            ('Monument',             ['Q4989906']),
+            ('Lighthouse',           ['Q39715']),
+            ('Ski Area',             ['Q130003']),
+            ('Winery',               ['Q156362']),
+            ('Brewery',              ['Q131734']),
+            ('Distillery',           ['Q18783']),
+            ('Stadium',              ['Q483110']),
+            ('Theater',              ['Q11635', 'Q24354']),
+            ('Tourist Attraction',   ['Q570116']),
+          ]
+          MIN_SL = { 'Mountain': 6, 'Lake': 4, 'Theater': 4, 'Stadium': 4, 'Museum': 3 }   # busy classes: a higher fame bar
+          def sparql(q, tries=4):
+            data = urllib.parse.urlencode({'query': q, 'format': 'json'}).encode()
+            for a in range(tries):
+              try:
+                req = urllib.request.Request(ENDPOINT, data=data, headers={'User-Agent': UA, 'Accept': 'application/sparql-results+json'})
+                with urllib.request.urlopen(req, timeout=90) as r: return json.load(r)['results']['bindings']
+              except Exception as e:
+                msg = str(e)[:120]; wait = 15 * (a + 1)
+                print(f'      retry {a+1} in {wait}s — {msg}', flush=True); time.sleep(wait)
+            return None
+          seen = {}; report = []
+          for kind, classes in KINDS:
+            minsl = MIN_SL.get(kind, 2); got = 0
+            for cls in classes:
+              walk = cls.endswith('*'); qid = cls.rstrip('*')
+              path = 'wdt:P31/wdt:P279*' if walk else 'wdt:P31'
+              q = f'''SELECT ?item ?itemLabel ?coord ?sl ?adminLabel WHERE {{
+                ?item {path} wd:{qid} ; wdt:P17 wd:Q30 ; wdt:P625 ?coord ; wikibase:sitelinks ?sl .
+                FILTER(?sl >= {minsl})
+                OPTIONAL {{ ?item wdt:P131 ?admin . }}
+                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
+              }} LIMIT 20000'''
+              rows = sparql(q)
+              if rows is None and walk:                      # the subclass walk timed out: fall back to direct instances
+                rows = sparql(q.replace('wdt:P31/wdt:P279*', 'wdt:P31'))
+              if rows is None: report.append((kind, qid, 'FAILED')); continue
+              n = 0
+              for b in rows:
+                item = b['item']['value'].rsplit('/', 1)[-1]
+                m = re.match(r'Point\(([-\d.]+) ([-\d.]+)\)', b['coord']['value'])
+                if not m: continue
+                name = b.get('itemLabel', {}).get('value', '')
+                if not name or name == item: continue             # no English label → not a place a guest will know
+                sl = int(b['sl']['value']); lon, lat = float(m.group(1)), float(m.group(2))
+                if not (24 <= lat <= 72 and -180 <= lon <= -65): continue   # US bounds incl. Alaska/Hawaii; drops stray coordinates
+                cur = seen.get(item)
+                if cur is None or sl > cur['sitelinks']:
+                  seen[item] = {'qid': item, 'name': name[:80], 'lat': round(lat, 5), 'lon': round(lon, 5), 'kind': cur['kind'] if cur else kind, 'sitelinks': sl, 'locality': b.get('adminLabel', {}).get('value', '')[:60], 'region': ''}
+                n += 1
+              got += n; report.append((kind, qid, n)); time.sleep(1.5)
+            print(f'  {kind:20s} {got:6d}', flush=True)
+          rows = sorted(seen.values(), key=lambda r: -r['sitelinks'])
+          with open('us-destinations.csv', 'w', newline='', encoding='utf-8') as f:
+            w = csv.DictWriter(f, fieldnames=['qid', 'name', 'lat', 'lon', 'kind', 'sitelinks', 'locality', 'region']); w.writeheader()
+            for r in rows: w.writerow(r)
+          print(f'\n== {len(rows):,} destinations written; by kind:')
+          byk = {}
+          for r in rows: byk[r['kind']] = byk.get(r['kind'], 0) + 1
+          for k, v in sorted(byk.items(), key=lambda x: -x[1]): print(f'   {k:20s} {v:6d}')
+          print('\n== queries that failed (kind, class):', [x for x in report if x[2] == 'FAILED'] or 'none')
+          print('\n== the 30 most famous:')
+          for r in rows[:30]: print(f'   {r["sitelinks"]:4d}  {r["name"]}  ({r["kind"]}, {r["locality"]})')
+          assert len(rows) > 1000, 'too few destinations — the queries are not answering; the previous release file stays'
+          PY
+
+      - name: Publish next to the tiles
+        run: |
+          gh release view tiles --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create tiles --repo "$GITHUB_REPOSITORY" --title "Places tiles" --notes "Built by the workflows in this repo."
+          gh release upload tiles us-destinations.csv --repo "$GITHUB_REPOSITORY" --clobber
+          echo "published us-destinations.csv"
