@@ -9,6 +9,10 @@ name: Build places tiles
 # v4 (2026-09-05, night): MARK, DON'T DELETE — stale / name-rule / low-quality rows stay in the file as a
 # search-only tier (t=1) the seeder never offers; staleness floor and offer floor are per bucket; an optional
 # website-liveness audit (tick the box when running) tests the free "still open?" proxy.
+# v5 (2026-09-06): THE DEAD-DOMAIN PROXY — run #7's audit showed 25–31% dead websites among eat/drink/grocery
+# rows last refreshed 2023–25 vs 11% among 2026 rows. Every offerable eat/drink/grocery row with its own website
+# domain is DNS-checked (NXDOMAIN on two resolvers = dead → search-only); results cached in domains.csv on the
+# release and re-checked after 90 days. Label rejections are search-only too, no longer dropped.
 # The rules JSON inside MIRRORS the Worker's RULES — change both, run the mirror check.
 # Runs monthly (Foursquare refreshes around the middle of each month) and on demand.
 
@@ -61,17 +65,20 @@ jobs:
           DT: ${{ steps.rel.outputs.dt }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python3 -m pip install --quiet huggingface_hub
+          python3 -m pip install --quiet huggingface_hub dnspython
           sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
+          # v5: the dead-domain cache from the last release (absent on the first run — that's fine)
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/domains.csv" -o /mnt/work/domains.csv || echo "no domain cache yet"
+          test -f /mnt/work/domains.csv && wc -l /mnt/work/domains.csv || true
           python3 - <<'PY'
-          # Custom Welcome Book — places file build, extract step v4 (mark, don't delete).
+          # Custom Welcome Book — places file build, extract step v5 (dead-domain proxy; label rejections search-only).
           # Runs inside the GitHub Actions job (see build-tiles.yml). Also runnable locally against any
-          # parquet files for validation:  python3 extract_v4.py --files a.parquet b.parquet --out ./work
+          # parquet files for validation:  python3 extract_v5.py --files a.parquet b.parquet --out ./work
           import duckdb, os, sys, time, json, argparse
 
           RULES = json.loads(r'''{
-            "version": 4,
-            "note": "THE category rules for the places file. Used verbatim by the build job (DuckDB, RE2 syntax) and the Worker (JS). Change here, then run the mirror check. v4: stale_before and offer_floor are PER BUCKET; a stale / name-rule / low-quality row is MARKED search-only (t=1) rather than deleted, so a host can always find it by name; only non-venues (label rejections, junk names, big-box-not-grocery) are dropped. demote_primary: a bare or vague top-level label (e.g. 'Other Great Outdoors') is search-only. reject_name_outdoors: non-destination businesses that carry an outdoors/arts label (a gas station tagged 'Other Great Outdoors', a mover tagged 'River') are search-only in park / museum / winery.",
+            "version": 5,
+            "note": "THE category rules for the places file. Used verbatim by the build job (DuckDB, RE2 syntax) and the Worker (JS). Change here, then run the mirror check. v4: stale_before and offer_floor are PER BUCKET; a stale / name-rule / low-quality row is MARKED search-only (t=1) rather than deleted, so a host can always find it by name; only non-venues (label rejections, junk names, big-box-not-grocery) are dropped. demote_primary: a bare or vague top-level label (e.g. 'Other Great Outdoors') is search-only. reject_name_outdoors: non-destination businesses that carry an outdoors/arts label (a gas station tagged 'Other Great Outdoors', a mover tagged 'River') are search-only in park / museum / winery. v5: a row whose own website domain no longer exists (DNS NXDOMAIN, checked at build time, cached 90 days in domains.csv) is search-only in eat/drink/grocery — run #7's audit: 25–31% dead among rows last refreshed 2023–25 vs 11% among 2026 rows. Label rejections (a venue primary with an office/lodging/service secondary) are search-only too, no longer dropped.",
             "primary": {
               "restaurant": "^Dining and Drinking > Restaurant",
               "cafe": "^Dining and Drinking > (Cafe, Coffee, and Tea House|Bakery|Dessert Shop|Donut Shop|Creperie|Bagel Shop)",
@@ -116,10 +123,22 @@ jobs:
               "stale",
               "name",
               "low-q",
-              "vague"
+              "vague",
+              "label",
+              "dead-site"
             ],
             "demote_primary": "^(Landmarks and Outdoors > Other Great Outdoors|Landmarks and Outdoors|Arts and Entertainment|Dining and Drinking|Retail)$",
-            "reject_name_outdoors": "(?i)\\b(citgo|shell|exxon|chevron|valero|marathon|sunoco|texaco|mobil|phillips 66|conoco|speedway|wawa|sheetz|buc-ee'?s|quiktrip|racetrac|pilot travel|love'?s travel|casey'?s|kum & go|circle k|gas station|fuel|truck stop|self storage|storage|moving|apartments?|condominiums?|tire|auto|towing|rental|realty|real estate|dental|clinic|pharmacy|bank|credit union|insurance|funeral|cemetery services)\\b"
+            "reject_name_outdoors": "(?i)\\b(citgo|shell|exxon|chevron|valero|marathon|sunoco|texaco|mobil|phillips 66|conoco|speedway|wawa|sheetz|buc-ee'?s|quiktrip|racetrac|pilot travel|love'?s travel|casey'?s|kum & go|circle k|gas station|fuel|truck stop|self storage|storage|moving|apartments?|condominiums?|tire|auto|towing|rental|realty|real estate|dental|clinic|pharmacy|bank|credit union|insurance|funeral|cemetery services)\\b",
+            "dead_site": {
+              "buckets": [
+                "restaurant",
+                "cafe",
+                "grocery"
+              ],
+              "recheck_days": 90,
+              "max_lookups": 600000,
+              "not_own_domain": "(^|\\.)(facebook|instagram|yelp|google|goo|bit|linktr|doordash|grubhub|ubereats|toasttab|squareup|square|clover|tripadvisor|foursquare|twitter|x|tiktok|youtube|linkedin|godaddysites|weebly|wordpress|blogspot|business|yellowpages|zomato|opentable|resy|seamless|postmates|untappd|allmenus|menupages|restaurantji|mapquest|waze|apple|amazon|wixsite|webs|homestead|sites|page|menufy|chownow|slicelife|order|cloveronline|localflavor|eventbrite|groupon)\\.(com|net|org|site|co|ly|ee|me|app|online|gl)$"
+            }
           }''')
 
           def q(s): return "'" + s.replace("'", "''") + "'"
@@ -216,6 +235,77 @@ jobs:
               for (name, bucket, site, qv, ry), why in dead[:25]: print(f'     {name} · {bucket} · {ry} · q{qv} · {site} · {why}')
               print(f'   audit took {time.time()-t0:.0f}s', flush=True)
 
+          def host_of(url):
+              """the bare domain of a website field ('http://www.Foo.com/menu' → 'foo.com'); '' when unusable"""
+              import re as _re
+              m = _re.match(r'^\s*(?:https?://)?([^/?#:\s]+)', str(url or ''), _re.I)
+              if not m: return ''
+              h = m.group(1).lower().strip('.')
+              if h.startswith('www.'): h = h[4:]
+              if '.' not in h or _re.search(r'[^a-z0-9.-]', h): return ''
+              return h
+
+          def dead_domains(con, workdir, resolvers=('1.1.1.1', '8.8.8.8'), workers=48):
+              """THE DEAD-DOMAIN PROXY (rules v5). Run #7's audit: among eat/drink/grocery rows with a website, 25–31% of
+                 those last refreshed 2023–25 had a dead site vs 11% of 2026 rows — a closure signal we can read for free.
+                 DNS only (no page fetch): NXDOMAIN = the domain no longer exists → the row becomes search-only ('dead-site').
+                 Domains that merely time out or fail oddly stay UNKNOWN (never punished). Own-domain sites only — a Facebook or
+                 DoorDash link says nothing about the business. Results are cached in domains.csv (uploaded with the release)
+                 and re-checked after recheck_days, so a monthly build only resolves what is new or old."""
+              import csv, time as _time, concurrent.futures, random
+              try:
+                  import dns.resolver, dns.exception
+              except ImportError:
+                  print('\n== dead-domain check SKIPPED: dnspython not installed', flush=True); return
+              R = RULES['dead_site']; buckets = R['buckets']; recheck = int(R.get('recheck_days', 90)) * 86400; max_lookups = int(R.get('max_lookups', 600000))
+              import re as _re; not_own = _re.compile(R['not_own_domain'])
+              rows = con.execute(f"""SELECT id, website FROM places WHERE t = 0 AND website <> '' AND bucket IN ({','.join(q(b) for b in buckets)})""").fetchall()
+              id_host = {}
+              for pid, site in rows:
+                  h = host_of(site)
+                  if h and not not_own.search(h): id_host[pid] = h
+              hosts = sorted(set(id_host.values()))
+              cache_path = os.path.join(workdir, 'domains.csv'); cache = {}
+              if os.path.exists(cache_path):
+                  with open(cache_path, newline='', encoding='utf-8') as f:
+                      for r in csv.DictReader(f):
+                          try: cache[r['domain']] = (r['status'], int(r['checked']))
+                          except Exception: pass
+              now = int(_time.time())
+              todo = [h for h in hosts if h not in cache or cache[h][0] == 'unknown' or now - cache[h][1] > recheck]
+              random.shuffle(todo); todo = todo[:max_lookups]
+              print(f'\n== dead-domain check: {len(rows):,} offerable eat/drink/grocery rows with a website → {len(hosts):,} own domains · {len(cache):,} cached · {len(todo):,} to resolve', flush=True)
+              res = [dns.resolver.Resolver(configure=False) for _ in resolvers]
+              for r_, ip in zip(res, resolvers): r_.nameservers = [ip]; r_.timeout = 3; r_.lifetime = 6
+              def look(i_h):
+                  i, h = i_h; r_ = res[i % len(res)]
+                  try:
+                      r_.resolve(h, 'A'); return h, 'ok'
+                  except dns.resolver.NXDOMAIN:
+                      try: res[(i + 1) % len(res)].resolve(h, 'A'); return h, 'ok'          # a second resolver must agree before a domain is called dead
+                      except dns.resolver.NXDOMAIN: return h, 'nx'
+                      except Exception: return h, 'unknown'
+                  except dns.resolver.NoAnswer: return h, 'ok'                                # the domain exists (no A record — mail-only or CNAME oddity)
+                  except Exception: return h, 'unknown'
+              t0 = _time.time(); done = 0
+              with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                  for h, st in ex.map(look, enumerate(todo)):
+                      cache[h] = (st, now); done += 1
+                      if done % 20000 == 0: print(f'   {done:,} resolved · {_time.time()-t0:.0f}s', flush=True)
+              with open(cache_path, 'w', newline='', encoding='utf-8') as f:
+                  w = csv.writer(f); w.writerow(['domain', 'status', 'checked'])
+                  for h in sorted(cache): w.writerow([h, cache[h][0], cache[h][1]])
+              nx = {h for h, (st, _) in cache.items() if st == 'nx'}
+              dead_ids = [pid for pid, h in id_host.items() if h in nx]
+              con.execute("CREATE OR REPLACE TABLE dead_ids (id VARCHAR)")
+              if dead_ids: con.executemany("INSERT INTO dead_ids VALUES (?)", [(x,) for x in dead_ids])
+              con.execute("UPDATE places SET t = 1 WHERE t = 0 AND id IN (SELECT id FROM dead_ids)")
+              st_counts = {}
+              for h in hosts: st_counts[cache.get(h, ('unchecked', 0))[0]] = st_counts.get(cache.get(h, ('unchecked', 0))[0], 0) + 1
+              print(f'   domains: ' + ' · '.join(f'{k} {v:,}' for k, v in sorted(st_counts.items())) + f' · {_time.time()-t0:.0f}s')
+              print(f'   rows moved to search-only (dead site): {len(dead_ids):,}')
+              for row in con.execute("SELECT bucket, coalesce(ry, 0) AS ry, count(*) FROM places WHERE id IN (SELECT id FROM dead_ids) GROUP BY 1, 2 ORDER BY 1, 2").fetchall(): print('   ', row)
+
           def run(files, workdir, download=None, token=None):
               os.makedirs(workdir, exist_ok=True)
               con = duckdb.connect(os.path.join(workdir, 'places.duckdb'))
@@ -236,18 +326,18 @@ jobs:
                   n = con.execute("SELECT count(*) FROM cand").fetchone()[0]
                   print(f'  [{i+1}/{len(files)}] {os.path.basename(path)} → candidates so far {n:,} · {time.time()-t0:.0f}s', flush=True)
               # --- the report: what the rules did ---
-              print('\n== candidates by bucket: offerable / search-only (stale · name · low-q · vague) / dropped (label · junk · bigbox)')
+              print('\n== candidates by bucket: offerable / search-only (stale · name · low-q · vague · label) / dropped (junk · bigbox)')
               F = RULES['offer_floor']
               floor_case = 'CASE bucket ' + ' '.join(f"WHEN '{b}' THEN {F[b]}" for b in F) + ' ELSE 3 END'
               for row in con.execute(f"""
                   SELECT bucket, count(*) FILTER (WHERE rej IS NULL AND q_raw >= {floor_case}) AS offer,
                          count(*) FILTER (WHERE rej='stale') AS so_stale, count(*) FILTER (WHERE rej='name') AS so_name,
                          count(*) FILTER (WHERE rej IS NULL AND q_raw < {floor_case}) AS so_lowq, count(*) FILTER (WHERE rej='vague') AS so_vague,
-                         count(*) FILTER (WHERE rej='label') AS d_label, count(*) FILTER (WHERE rej='junk-name') AS d_junk, count(*) FILTER (WHERE rej='bigbox-not-grocery') AS d_bb
+                         count(*) FILTER (WHERE rej='label') AS so_label, count(*) FILTER (WHERE rej='junk-name') AS d_junk, count(*) FILTER (WHERE rej='bigbox-not-grocery') AS d_bb
                   FROM cand GROUP BY bucket ORDER BY bucket""").fetchall():
                   print('  ', row)
               print('\n== sample of rejected rows (reason · bucket · name · primary label)')
-              for row in con.execute("SELECT rej, bucket, name, prim FROM cand WHERE rej IN ('label','junk-name','bigbox-not-grocery') USING SAMPLE 40 ROWS").fetchall():
+              for row in con.execute("SELECT rej, bucket, name, labels FROM cand WHERE rej IN ('label','junk-name','bigbox-not-grocery') USING SAMPLE 40 ROWS").fetchall():
                   print('  ', row)
               # the staleness question (is the floor 5 years or 2?): how many venue rows Foursquare last refreshed in each year,
               # counting the ones the floor rejected too, so the floor can be moved with numbers instead of guesses
@@ -272,18 +362,21 @@ jobs:
                   FROM (
                     SELECT *, regexp_replace(regexp_replace(regexp_replace(lower(name), '(bar[ -]?b[ -]?que|barbe?que|barbecue|bbq)', 'bbq', 'g'), '\\b(the|and|&|of|at|a|an)\\b', '', 'g'), '[^a-z0-9]', '', 'g') AS nname,
                            CASE WHEN rej IS NULL AND q_raw >= {floor_case} THEN 0 ELSE 1 END AS t
-                    FROM cand WHERE rej IS NULL OR rej IN ('stale', 'name', 'vague')
+                    FROM cand WHERE rej IS NULL OR rej IN ('stale', 'name', 'vague', 'label')
                   )
                 ) WHERE rn = 1
               """)
               total = con.execute("SELECT count(*) FROM places").fetchone()[0]
               offer = con.execute("SELECT count(*) FROM places WHERE t = 0").fetchone()[0]
-              dups = con.execute("SELECT count(*) FROM cand WHERE rej IS NULL OR rej IN ('stale', 'name', 'vague')").fetchone()[0] - total
+              dups = con.execute("SELECT count(*) FROM cand WHERE rej IS NULL OR rej IN ('stale', 'name', 'vague', 'label')").fetchone()[0] - total
               print(f'\n== kept {total:,} places: {offer:,} offerable + {total-offer:,} search-only · {dups:,} duplicates collapsed · {time.time()-t0:.0f}s')
               print('== score distribution of the offerable rows (q → places)')
               for row in con.execute("SELECT q, count(*) FROM places WHERE t = 0 GROUP BY q ORDER BY q").fetchall(): print('  ', row)
               if os.environ.get('AUDIT_WEBSITES') == '1': audit_websites(con)
+              if os.environ.get('DEAD_DOMAINS', '1') == '1': dead_domains(con, workdir)
+              offer = con.execute("SELECT count(*) FROM places WHERE t = 0").fetchone()[0]
               con.execute(f"COPY (SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, q, chain, ry, t FROM places) TO {q(os.path.join(workdir, 'us.csv'))} (HEADER, DELIMITER ',')")
+              with open(os.path.join(workdir, 'offerable.txt'), 'w') as f: f.write(str(offer))
               with open(os.path.join(workdir, 'count.txt'), 'w') as f: f.write(str(total))
               con.close()
               return total
@@ -302,7 +395,8 @@ jobs:
                   except Exception as e: print(f'  download retry {attempt+1} for {path}: {e}'); time.sleep(10 * (attempt + 1))
               sys.exit(f'could not download {path}')
           total = run(files, '/mnt/work', download=download)
-          import shutil; shutil.copy('/mnt/work/us.csv', 'us.csv'); shutil.copy('/mnt/work/count.txt', 'count.txt')
+          import shutil; shutil.copy('/mnt/work/us.csv', 'us.csv'); shutil.copy('/mnt/work/count.txt', 'count.txt'); shutil.copy('/mnt/work/offerable.txt', 'offerable.txt')
+          if os.path.exists('/mnt/work/domains.csv'): shutil.copy('/mnt/work/domains.csv', 'domains.csv')
           print(f'{total:,} places kept from release {dt}')
           PY
           rm -rf /mnt/work/dl
@@ -346,8 +440,8 @@ jobs:
           import json, os, time
           json.dump({'source': 'Foursquare OS Places (Apache-2.0) via huggingface.co/datasets/foursquare/fsq-os-places',
                      'release': os.environ['DT'], 'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                     'features': int(open('count.txt').read()), 'bytes': os.path.getsize('fsq-us.pmtiles'),
-                     'rules': 4, 'zooms': {'12': 'all six categories', '10-11': 'park, museum, winery only'}},
+                     'features': int(open('count.txt').read()), 'offerable': int(open('offerable.txt').read()), 'bytes': os.path.getsize('fsq-us.pmtiles'),
+                     'rules': 5, 'zooms': {'12': 'all six categories', '10-11': 'park, museum, winery only'}},
                     open('manifest.json', 'w'), indent=2)
           print(open('manifest.json').read())
           PY
@@ -359,4 +453,5 @@ jobs:
             gh release create tiles --repo "$GITHUB_REPOSITORY" --title "Places tiles" \
               --notes "Nearby-places tile file for Custom Welcome Book. Contains data from Foursquare OS Places (Apache License 2.0). Rebuilt monthly."
           gh release upload tiles fsq-us.pmtiles manifest.json --repo "$GITHUB_REPOSITORY" --clobber
+          test -f domains.csv && gh release upload tiles domains.csv --repo "$GITHUB_REPOSITORY" --clobber || echo "no domain cache to publish"
           echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/fsq-us.pmtiles"
