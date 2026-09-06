@@ -6,11 +6,19 @@ name: Build places tiles
 # Publishes it as a release asset named "tiles" that the Cloudflare Worker range-reads.
 # v3 (2026-09-05): data-quality rules — primary-label whitelists, office/service rejection, name rules,
 # a staleness floor, a 0–6 quality score, duplicate collapse, and a printed rejection report.
+# v4 (2026-09-05, night): MARK, DON'T DELETE — stale / name-rule / low-quality rows stay in the file as a
+# search-only tier (t=1) the seeder never offers; staleness floor and offer floor are per bucket; an optional
+# website-liveness audit (tick the box when running) tests the free "still open?" proxy.
 # The rules JSON inside MIRRORS the Worker's RULES — change both, run the mirror check.
 # Runs monthly (Foursquare refreshes around the middle of each month) and on demand.
 
 on:
   workflow_dispatch:
+    inputs:
+      audit_websites:
+        description: 'Also knock on ~480 websites and report the dead rate by year (adds ~3 min)'
+        type: boolean
+        default: false
   schedule:
     - cron: '0 10 16 * *'
 
@@ -23,6 +31,7 @@ jobs:
     timeout-minutes: 300
     env:
       GH_TOKEN: ${{ github.token }}
+      AUDIT_WEBSITES: ${{ (github.event.inputs.audit_websites == 'true') && '1' || '0' }}
     steps:
       - name: Tools (tippecanoe from source, DuckDB)
         run: |
@@ -55,14 +64,14 @@ jobs:
           python3 -m pip install --quiet huggingface_hub
           sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
           python3 - <<'PY'
-          # Custom Welcome Book — places file build, extract step v3 (data quality).
+          # Custom Welcome Book — places file build, extract step v4 (mark, don't delete).
           # Runs inside the GitHub Actions job (see build-tiles.yml). Also runnable locally against any
-          # parquet files for validation:  python3 extract_v3.py --files a.parquet b.parquet --out ./work
+          # parquet files for validation:  python3 extract_v4.py --files a.parquet b.parquet --out ./work
           import duckdb, os, sys, time, json, argparse
 
           RULES = json.loads(r'''{
-            "version": 3,
-            "note": "THE category rules for the places file. Used verbatim by the build job (DuckDB, RE2 syntax) and the Worker (JS). Change here, then run the mirror check. stale_before: a record Foursquare has not refreshed since this date is left out (closed-for-years places rarely get refreshed).",
+            "version": 4,
+            "note": "THE category rules for the places file. Used verbatim by the build job (DuckDB, RE2 syntax) and the Worker (JS). Change here, then run the mirror check. v4: stale_before and offer_floor are PER BUCKET; a stale / name-rule / low-quality row is MARKED search-only (t=1) rather than deleted, so a host can always find it by name; only non-venues (label rejections, junk names, big-box-not-grocery) are dropped. demote_primary: a bare or vague top-level label (e.g. 'Other Great Outdoors') is search-only. reject_name_outdoors: non-destination businesses that carry an outdoors/arts label (a gas station tagged 'Other Great Outdoors', a mover tagged 'River') are search-only in park / museum / winery.",
             "primary": {
               "restaurant": "^Dining and Drinking > Restaurant",
               "cafe": "^Dining and Drinking > (Cafe, Coffee, and Tea House|Bakery|Dessert Shop|Donut Shop|Creperie|Bagel Shop)",
@@ -71,7 +80,7 @@ jobs:
               "park": "^Landmarks and Outdoors > (Park|Beach|Scenic Lookout|Hiking Trail|Trail|Bike Trail|Nature Preserve|Nature Reserve|Lake|Waterfall|Garden|Botanical Garden|Sculpture Garden|Forest|Mountain|River|Reservoir|Canyon|Cave|Hot Spring|Island|Bay|Harbor|Marina|Dog Park|Playground|Picnic Area|State Park|National Park|Wildlife|Other Great Outdoors)",
               "museum": "^(Arts and Entertainment > (Museum|Art Gallery|Performing Arts Venue|Movie Theater|Arcade|Bowling Alley|Zoo|Aquarium|Amusement Park|Water Park|Mini Golf Course|Planetarium|Science Museum|History Museum|Art Museum|Exhibit|Public Art)|Landmarks and Outdoors > (Historic and Protected Site|Monument|Landmark|Historic Site))"
             },
-            "reject_any_label": "(Business and Professional Services|Health and Medicine|Travel and Transportation > (Lodging|Fuel Station|Travel Lounge|Transportation)|Retail > (Home Improvement|Automotive|Furniture and Home|Garden Center|Pet)|Community and Government > (Education|Government|Organization|Religious|Military)|Sports and Recreation > (Gym|Fitness|Athletic)|Event > |Office|Home Service|Event Space|Consult|Real Estate|Landscap|Food Truck|Cafeteria|Gaming Cafe|Internet Cafe|College|Night Club|Strip Club|Adult|Hookah|Vape|Smoke Shop)",
+            "reject_any_label": "(Business and Professional Services|Health and Medicine|Travel and Transportation > (Lodging|Fuel Station|Travel Lounge|Transportation|Moving)|Storage Facility|Self Storage|Retail > (Home Improvement|Automotive|Furniture and Home|Garden Center|Pet)|Community and Government > (Education|Government|Organization|Religious|Military)|Sports and Recreation > (Gym|Fitness|Athletic)|Event > |Office|Home Service|Event Space|Consult|Real Estate|Landscap|Food Truck|Cafeteria|Gaming Cafe|Internet Cafe|College|Night Club|Strip Club|Adult|Hookah|Vape|Smoke Shop)",
             "reject_name": "(?i)\\b(at home|mobile|delivery only|catering|caterers?|concierge|consult(ing|ants?)|services?|llc|inc\\.?|ltd\\.?|corp\\.?|enterprises|solutions|wholesale|distribut(or|ion)|vending|permanently closed|closed)\\b",
             "grocery_bigbox_needs": "(Supermarket|Grocery Store)",
             "chains": "(?i)^(mcdonald|subway|sonic drive|whataburger|starbucks|walmart|dollar general|domino|pizza hut|taco bell|wendy|burger king|chick-fil-a|dunkin|kfc|popeyes|arby|jack in the box|little caesars|papa john|chipotle|panda express|waffle house|ihop|denny|cracker barrel|applebee|chili's|olive garden|dairy queen|wingstop|zaxby|culver|in-n-out|five guys|jimmy john|jersey mike|firehouse subs|panera|dutch bros|7-eleven|circle k|walgreens|cvs|taco cabana|bill miller|raising cane|church's|carl's jr|hardee|long john silver|schlotzsky|cicis|golden corral|red lobster|texas roadhouse|outback|buffalo wild wings|hooters|twin peaks|dave & buster|main event|sam's club|costco|h-e-b plus)",
@@ -87,7 +96,30 @@ jobs:
               "fast_food_penalty": -1
             },
             "dedupe_grid_deg": 0.003,
-            "stale_before": "2021-01-01"
+            "stale_before": {
+              "restaurant": "2023-01-01",
+              "cafe": "2023-01-01",
+              "grocery": "2023-01-01",
+              "winery": "2021-01-01",
+              "park": "2021-01-01",
+              "museum": "2021-01-01"
+            },
+            "offer_floor": {
+              "restaurant": 3,
+              "cafe": 3,
+              "grocery": 3,
+              "winery": 2,
+              "park": 2,
+              "museum": 2
+            },
+            "search_only": [
+              "stale",
+              "name",
+              "low-q",
+              "vague"
+            ],
+            "demote_primary": "^(Landmarks and Outdoors > Other Great Outdoors|Landmarks and Outdoors|Arts and Entertainment|Dining and Drinking|Retail)$",
+            "reject_name_outdoors": "(?i)\\b(citgo|shell|exxon|chevron|valero|marathon|sunoco|texaco|mobil|phillips 66|conoco|speedway|wawa|sheetz|buc-ee'?s|quiktrip|racetrac|pilot travel|love'?s travel|casey'?s|kum & go|circle k|gas station|fuel|truck stop|self storage|storage|moving|apartments?|condominiums?|tire|auto|towing|rental|realty|real estate|dental|clinic|pharmacy|bank|credit union|insurance|funeral|cemetery services)\\b"
           }''')
 
           def q(s): return "'" + s.replace("'", "''") + "'"
@@ -115,11 +147,14 @@ jobs:
                        CASE
                          WHEN regexp_matches(labels, {q(RULES['reject_any_label'])}) THEN 'label'
                          WHEN regexp_matches(name, {q(RULES['reject_name'])}) THEN 'name'
+                         WHEN bucket IN ('park', 'museum', 'winery') AND regexp_matches(name, {q(RULES['reject_name_outdoors'])}) THEN 'name'
+                         WHEN regexp_matches(prim, {q(RULES['demote_primary'])}) THEN 'vague'
                          WHEN length(trim(name)) < 3 OR regexp_matches(name, '^[0-9 ()+.-]+$') THEN 'junk-name'
                          WHEN bucket = 'grocery' AND regexp_matches(prim, '^Retail > Big Box Store') AND NOT regexp_matches(labels, {q(RULES['grocery_bigbox_needs'])}) THEN 'bigbox-not-grocery'
-                         WHEN {dat('date_refreshed')} < DATE {q(RULES['stale_before'])} THEN 'stale'
+                         WHEN bucket = 'restaurant' AND {dat('date_refreshed')} < DATE '{RULES['stale_before']['restaurant']}' THEN 'stale' WHEN bucket = 'cafe' AND {dat('date_refreshed')} < DATE '{RULES['stale_before']['cafe']}' THEN 'stale' WHEN bucket = 'grocery' AND {dat('date_refreshed')} < DATE '{RULES['stale_before']['grocery']}' THEN 'stale' WHEN bucket = 'winery' AND {dat('date_refreshed')} < DATE '{RULES['stale_before']['winery']}' THEN 'stale' WHEN bucket = 'park' AND {dat('date_refreshed')} < DATE '{RULES['stale_before']['park']}' THEN 'stale' WHEN bucket = 'museum' AND {dat('date_refreshed')} < DATE '{RULES['stale_before']['museum']}' THEN 'stale'
                          ELSE NULL
                        END AS rej,
+                       coalesce({txt('website')},'') AS website,
                        (CASE WHEN length(trim(coalesce({txt('address')},''))) > 0 AND coalesce({txt('po_box')},'') = '' THEN {RULES['score']['address']} ELSE 0 END
                         + CASE WHEN coalesce({txt('tel')},'') <> '' THEN {RULES['score']['tel']} ELSE 0 END
                         + CASE WHEN coalesce({txt('website')},'') <> '' THEN {RULES['score']['website']} ELSE 0 END
@@ -140,11 +175,52 @@ jobs:
                 ) WHERE bucket IS NOT NULL
               """
 
+          def audit_websites(con, n=480, timeout=6, workers=24):
+              """THE PROXY QUESTION (Brandon, 2026-09-05): can a dead website stand in for a paid "still open?" check?
+                 Sample offerable eat/drink/grocery rows that list a website, stratified by refresh year, and knock on
+                 each: DNS failure / refused / timeout = DEAD; any HTTP answer (even 403/404) = ALIVE (the domain lives).
+                 Prints the dead rate by year and by score — the evidence for or against the proxy."""
+              import urllib.request, urllib.error, socket, ssl, concurrent.futures, random
+              rows = con.execute(f"""
+                  SELECT name, bucket, website, q, coalesce(ry, 0) AS ry FROM (
+                    SELECT *, row_number() OVER (PARTITION BY coalesce(ry, 0) ORDER BY random()) AS rn
+                    FROM places WHERE t = 0 AND bucket IN ('restaurant', 'cafe', 'grocery') AND website <> '' AND website LIKE 'http%'
+                  ) WHERE rn <= {n // 6} """).fetchall()
+              ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+              def knock(u):
+                  try:
+                      req = urllib.request.Request(u, method='HEAD', headers={'User-Agent': 'Mozilla/5.0 (compatible; CWB places audit; +https://customwelcomebook.example)'})
+                      with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r: return 'alive', r.status
+                  except urllib.error.HTTPError as e: return ('alive', e.code)          # the server answered — the domain lives
+                  except (urllib.error.URLError, socket.timeout, ConnectionError, OSError, ValueError) as e:
+                      return ('dead', str(getattr(e, 'reason', e))[:60])
+                  except Exception as e: return ('unknown', str(e)[:60])
+              print(f'\n== website liveness audit: {len(rows)} offerable eat/drink/grocery rows with a website, by refresh year', flush=True)
+              t0 = time.time(); results = []
+              with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                  for (row, res) in zip(rows, ex.map(lambda r: knock(r[2]), rows)): results.append((row, res))
+              by = {}
+              for (name, bucket, site, qv, ry), (state, info) in results:
+                  o = by.setdefault(ry, {'n': 0, 'dead': 0, 'unknown': 0}); o['n'] += 1
+                  if state == 'dead': o['dead'] += 1
+                  elif state == 'unknown': o['unknown'] += 1
+              print('   year · sites · dead · dead% · unknown')
+              for ry in sorted(by): o = by[ry]; print(f'   {ry} · {o["n"]} · {o["dead"]} · {round(100*o["dead"]/o["n"]) if o["n"] else 0}% · {o["unknown"]}')
+              byq = {}
+              for (name, bucket, site, qv, ry), (state, info) in results:
+                  o = byq.setdefault(qv, {'n': 0, 'dead': 0}); o['n'] += 1; o['dead'] += (state == 'dead')
+              print('   score q · sites · dead%'); 
+              for qv in sorted(byq): o = byq[qv]; print(f'   q{qv} · {o["n"]} · {round(100*o["dead"]/o["n"]) if o["n"] else 0}%')
+              print('   sample of DEAD sites (name · bucket · year · q · why):')
+              dead = [(r, i) for r, (s, i) in results if s == 'dead']; random.shuffle(dead)
+              for (name, bucket, site, qv, ry), why in dead[:25]: print(f'     {name} · {bucket} · {ry} · q{qv} · {site} · {why}')
+              print(f'   audit took {time.time()-t0:.0f}s', flush=True)
+
           def run(files, workdir, download=None, token=None):
               os.makedirs(workdir, exist_ok=True)
               con = duckdb.connect(os.path.join(workdir, 'places.duckdb'))
               con.execute("SET threads=4; SET memory_limit='4GB'; SET preserve_insertion_order=false;")
-              con.execute("CREATE OR REPLACE TABLE cand (id VARCHAR, name VARCHAR, lat DOUBLE, lon DOUBLE, address VARCHAR, locality VARCHAR, region VARCHAR, postcode VARCHAR, labels VARCHAR, prim VARCHAR, bucket VARCHAR, rej VARCHAR, q_raw INTEGER, chain INTEGER, ry INTEGER)")
+              con.execute("CREATE OR REPLACE TABLE cand (id VARCHAR, name VARCHAR, lat DOUBLE, lon DOUBLE, address VARCHAR, locality VARCHAR, region VARCHAR, postcode VARCHAR, labels VARCHAR, prim VARCHAR, bucket VARCHAR, rej VARCHAR, website VARCHAR, q_raw INTEGER, chain INTEGER, ry INTEGER)")
               t0 = time.time(); cols = None
               for i, path in enumerate(files):
                   local = download(path) if download else path
@@ -160,15 +236,18 @@ jobs:
                   n = con.execute("SELECT count(*) FROM cand").fetchone()[0]
                   print(f'  [{i+1}/{len(files)}] {os.path.basename(path)} → candidates so far {n:,} · {time.time()-t0:.0f}s', flush=True)
               # --- the report: what the rules did ---
-              print('\n== candidates by bucket: kept / rejected (label · name · junk · bigbox · stale)')
-              for row in con.execute("""
-                  SELECT bucket, count(*) FILTER (WHERE rej IS NULL) AS kept,
-                         count(*) FILTER (WHERE rej='label') AS r_label, count(*) FILTER (WHERE rej='name') AS r_name,
-                         count(*) FILTER (WHERE rej='junk-name') AS r_junk, count(*) FILTER (WHERE rej='bigbox-not-grocery') AS r_bb, count(*) FILTER (WHERE rej='stale') AS r_stale
+              print('\n== candidates by bucket: offerable / search-only (stale · name · low-q · vague) / dropped (label · junk · bigbox)')
+              F = RULES['offer_floor']
+              floor_case = 'CASE bucket ' + ' '.join(f"WHEN '{b}' THEN {F[b]}" for b in F) + ' ELSE 3 END'
+              for row in con.execute(f"""
+                  SELECT bucket, count(*) FILTER (WHERE rej IS NULL AND q_raw >= {floor_case}) AS offer,
+                         count(*) FILTER (WHERE rej='stale') AS so_stale, count(*) FILTER (WHERE rej='name') AS so_name,
+                         count(*) FILTER (WHERE rej IS NULL AND q_raw < {floor_case}) AS so_lowq, count(*) FILTER (WHERE rej='vague') AS so_vague,
+                         count(*) FILTER (WHERE rej='label') AS d_label, count(*) FILTER (WHERE rej='junk-name') AS d_junk, count(*) FILTER (WHERE rej='bigbox-not-grocery') AS d_bb
                   FROM cand GROUP BY bucket ORDER BY bucket""").fetchall():
                   print('  ', row)
               print('\n== sample of rejected rows (reason · bucket · name · primary label)')
-              for row in con.execute("SELECT rej, bucket, name, prim FROM cand WHERE rej IS NOT NULL USING SAMPLE 40 ROWS").fetchall():
+              for row in con.execute("SELECT rej, bucket, name, prim FROM cand WHERE rej IN ('label','junk-name','bigbox-not-grocery') USING SAMPLE 40 ROWS").fetchall():
                   print('  ', row)
               # the staleness question (is the floor 5 years or 2?): how many venue rows Foursquare last refreshed in each year,
               # counting the ones the floor rejected too, so the floor can be moved with numbers instead of guesses
@@ -179,26 +258,32 @@ jobs:
                   print('  ', row)
               # --- final table: kept rows, score clamped 0..6, duplicates collapsed ---
               g = RULES['dedupe_grid_deg']
+              # v4: a stale / name-rule / low-quality row stays in the file as SEARCH-ONLY (t=1): the seeder never offers it,
+              # the host's name search still finds it. Only non-venues are dropped. Duplicates collapse across both tiers,
+              # the offerable copy winning.
               con.execute(f"""
                 CREATE OR REPLACE TABLE places AS
-                SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket,
-                       greatest(0, least(6, q_raw)) AS q, chain, ry
+                SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, website,
+                       greatest(0, least(6, q_raw)) AS q, chain, ry, t
                 FROM (
                   SELECT *, row_number() OVER (
                            PARTITION BY bucket, nname, round(lat / {g}), round(lon / {g})
-                           ORDER BY q_raw DESC, coalesce(ry, 0) DESC, length(address) DESC) AS rn
+                           ORDER BY t ASC, q_raw DESC, coalesce(ry, 0) DESC, length(address) DESC) AS rn
                   FROM (
-                    SELECT *, regexp_replace(regexp_replace(regexp_replace(lower(name), '(bar[ -]?b[ -]?que|barbe?que|barbecue|bbq)', 'bbq', 'g'), '\\b(the|and|&|of|at|a|an)\\b', '', 'g'), '[^a-z0-9]', '', 'g') AS nname
-                    FROM cand WHERE rej IS NULL
+                    SELECT *, regexp_replace(regexp_replace(regexp_replace(lower(name), '(bar[ -]?b[ -]?que|barbe?que|barbecue|bbq)', 'bbq', 'g'), '\\b(the|and|&|of|at|a|an)\\b', '', 'g'), '[^a-z0-9]', '', 'g') AS nname,
+                           CASE WHEN rej IS NULL AND q_raw >= {floor_case} THEN 0 ELSE 1 END AS t
+                    FROM cand WHERE rej IS NULL OR rej IN ('stale', 'name', 'vague')
                   )
                 ) WHERE rn = 1
               """)
               total = con.execute("SELECT count(*) FROM places").fetchone()[0]
-              dups = con.execute("SELECT count(*) FROM cand WHERE rej IS NULL").fetchone()[0] - total
-              print(f'\n== kept {total:,} places · {dups:,} duplicates collapsed · {time.time()-t0:.0f}s')
-              print('== score distribution (q → places)')
-              for row in con.execute("SELECT q, count(*) FROM places GROUP BY q ORDER BY q").fetchall(): print('  ', row)
-              con.execute(f"COPY places TO {q(os.path.join(workdir, 'us.csv'))} (HEADER, DELIMITER ',')")
+              offer = con.execute("SELECT count(*) FROM places WHERE t = 0").fetchone()[0]
+              dups = con.execute("SELECT count(*) FROM cand WHERE rej IS NULL OR rej IN ('stale', 'name', 'vague')").fetchone()[0] - total
+              print(f'\n== kept {total:,} places: {offer:,} offerable + {total-offer:,} search-only · {dups:,} duplicates collapsed · {time.time()-t0:.0f}s')
+              print('== score distribution of the offerable rows (q → places)')
+              for row in con.execute("SELECT q, count(*) FROM places WHERE t = 0 GROUP BY q ORDER BY q").fetchall(): print('  ', row)
+              if os.environ.get('AUDIT_WEBSITES') == '1': audit_websites(con)
+              con.execute(f"COPY (SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, q, chain, ry, t FROM places) TO {q(os.path.join(workdir, 'us.csv'))} (HEADER, DELIMITER ',')")
               with open(os.path.join(workdir, 'count.txt'), 'w') as f: f.write(str(total))
               con.close()
               return total
@@ -233,9 +318,10 @@ jobs:
               try: lat, lon = float(row['lat']), float(row['lon'])
               except: continue
               props = {k: row[k] for k in ('name', 'address', 'locality', 'region', 'postcode', 'labels', 'bucket', 'id') if row.get(k)}
-              for k in ('q', 'chain', 'ry'):
+              for k in ('q', 'chain', 'ry', 't'):
                 try: props[k] = int(row[k])
                 except: pass
+              if props.get('t') == 0: del props['t']      # offerable is the default; only search-only rows carry t=1
               out.write(json.dumps({'type': 'Feature', 'properties': props, 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}}, ensure_ascii=False) + '\n')
               n += 1
           print(n, 'features written')
@@ -261,7 +347,7 @@ jobs:
           json.dump({'source': 'Foursquare OS Places (Apache-2.0) via huggingface.co/datasets/foursquare/fsq-os-places',
                      'release': os.environ['DT'], 'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                      'features': int(open('count.txt').read()), 'bytes': os.path.getsize('fsq-us.pmtiles'),
-                     'rules': 3, 'zooms': {'12': 'all six categories', '10-11': 'park, museum, winery only'}},
+                     'rules': 4, 'zooms': {'12': 'all six categories', '10-11': 'park, museum, winery only'}},
                     open('manifest.json', 'w'), indent=2)
           print(open('manifest.json').read())
           PY
