@@ -12,6 +12,7 @@ name: Build places tiles
 # v6 (2026-09-06): THE HIERARCHY — kind rank k (1 named destination / distinctive eating · 2 · 3 never offered),
 # chains found in the data (name or domain shared by ≥ 20 rows = national, ≥ 5 = regional), grocery never
 # offered, Wikidata destinations merged from us-destinations.csv (the Destinations update job) as a 7th bucket.
+# v7b (2026-09-07): numpy added to the pip line — DuckDB's Python function host_of() needs it; the first v7 run failed there.
 # v7 (2026-09-06, night — Brandon: "a trash bin is still a trash bin"): DELETE, DON'T MARK, for the far gone — rows last
 # refreshed before 2021 (or never dated) and rows whose own website domain is dead leave the file entirely; the overnight
 # review's exclusions.csv (id, reason) is applied when present; the row file (places.csv.gz) is published with the tiles
@@ -72,7 +73,7 @@ jobs:
           DT: ${{ steps.rel.outputs.dt }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python3 -m pip install --quiet huggingface_hub dnspython
+          python3 -m pip install --quiet huggingface_hub dnspython numpy   # numpy: DuckDB needs it for the host_of() Python function (v7b — the v7 run failed without it)
           sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
           # v5: the dead-domain cache from the last release (absent on the first run — that's fine)
           curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/domains.csv" -o /mnt/work/domains.csv || echo "no domain cache yet"
