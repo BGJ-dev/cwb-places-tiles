@@ -9,6 +9,13 @@ name: Build places tiles
 # v4 (2026-09-05, night): MARK, DON'T DELETE — stale / name-rule / low-quality rows stay in the file as a
 # search-only tier (t=1) the seeder never offers; staleness floor and offer floor are per bucket; an optional
 # website-liveness audit (tick the box when running) tests the free "still open?" proxy.
+# v6 (2026-09-06): THE HIERARCHY — kind rank k (1 named destination / distinctive eating · 2 · 3 never offered),
+# chains found in the data (name or domain shared by ≥ 20 rows = national, ≥ 5 = regional), grocery never
+# offered, Wikidata destinations merged from us-destinations.csv (the Destinations update job) as a 7th bucket.
+# v7 (2026-09-06, night — Brandon: "a trash bin is still a trash bin"): DELETE, DON'T MARK, for the far gone — rows last
+# refreshed before 2021 (or never dated) and rows whose own website domain is dead leave the file entirely; the overnight
+# review's exclusions.csv (id, reason) is applied when present; the row file (places.csv.gz) is published with the tiles
+# so the review and the Overture evaluation have their input.
 # v5 (2026-09-06): THE DEAD-DOMAIN PROXY — run #7's audit showed 25–31% dead websites among eat/drink/grocery
 # rows last refreshed 2023–25 vs 11% among 2026 rows. Every offerable eat/drink/grocery row with its own website
 # domain is DNS-checked (NXDOMAIN on two resolvers = dead → search-only); results cached in domains.csv on the
@@ -60,7 +67,7 @@ jobs:
           print('latest Foursquare release:', dts[-1])
           PY
 
-      - name: Extract US open places in our six categories — data quality v3 (download each file, classify, score, dedupe)
+      - name: Extract US open places in our six categories — rules v7 (download each file, classify, score, delete relics and dead sites, dedupe)
         env:
           DT: ${{ steps.rel.outputs.dt }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -69,16 +76,21 @@ jobs:
           sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
           # v5: the dead-domain cache from the last release (absent on the first run — that's fine)
           curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/domains.csv" -o /mnt/work/domains.csv || echo "no domain cache yet"
+          # v6: the famous-places list from the Destinations update job (absent until that job has run once)
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/us-destinations.csv" -o /mnt/work/us-destinations.csv || echo "no destinations yet"
+          # v7: the overnight review's verdicts (absent until the review has run once)
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/exclusions.csv" -o /mnt/work/exclusions.csv || echo "no exclusions yet"
           test -f /mnt/work/domains.csv && wc -l /mnt/work/domains.csv || true
           python3 - <<'PY'
-          # Custom Welcome Book — places file build, extract step v5 (dead-domain proxy; label rejections search-only).
+          # Custom Welcome Book — places file build, extract step v7 (delete, don't mark: relics and dead sites leave the file; the review's exclusions apply).
+          # v6 inside: kind ranks, chains from the data, destinations merged.
           # Runs inside the GitHub Actions job (see build-tiles.yml). Also runnable locally against any
-          # parquet files for validation:  python3 extract_v5.py --files a.parquet b.parquet --out ./work
+          # parquet files for validation:  python3 extract_v7.py --files a.parquet b.parquet --out ./work
           import duckdb, os, sys, time, json, argparse
 
           RULES = json.loads(r'''{
-            "version": 5,
-            "note": "THE category rules for the places file. Used verbatim by the build job (DuckDB, RE2 syntax) and the Worker (JS). Change here, then run the mirror check. v4: stale_before and offer_floor are PER BUCKET; a stale / name-rule / low-quality row is MARKED search-only (t=1) rather than deleted, so a host can always find it by name; only non-venues (label rejections, junk names, big-box-not-grocery) are dropped. demote_primary: a bare or vague top-level label (e.g. 'Other Great Outdoors') is search-only. reject_name_outdoors: non-destination businesses that carry an outdoors/arts label (a gas station tagged 'Other Great Outdoors', a mover tagged 'River') are search-only in park / museum / winery. v5: a row whose own website domain no longer exists (DNS NXDOMAIN, checked at build time, cached 90 days in domains.csv) is search-only in eat/drink/grocery — run #7's audit: 25–31% dead among rows last refreshed 2023–25 vs 11% among 2026 rows. Label rejections (a venue primary with an office/lodging/service secondary) are search-only too, no longer dropped.",
+            "version": 7,
+            "note": "THE category rules for the places file. Used verbatim by the build job (DuckDB, RE2 syntax) and the Worker (JS). Change here, then run the mirror check. v4: stale_before and offer_floor are PER BUCKET; a stale / name-rule / low-quality row is MARKED search-only (t=1) rather than deleted, so a host can always find it by name; only non-venues (label rejections, junk names, big-box-not-grocery) are dropped. demote_primary: a bare or vague top-level label (e.g. 'Other Great Outdoors') is search-only. reject_name_outdoors: non-destination businesses that carry an outdoors/arts label (a gas station tagged 'Other Great Outdoors', a mover tagged 'River') are search-only in park / museum / winery. v5: a row whose own website domain no longer exists (DNS NXDOMAIN, checked at build time, cached 90 days in domains.csv) is search-only in eat/drink/grocery — run #7's audit: 25–31% dead among rows last refreshed 2023–25 vs 11% among 2026 rows. Label rejections (a venue primary with an office/lodging/service secondary) are search-only too, no longer dropped. v6 (the hierarchy, Brandon 2026-09-06): kind ranks per finer label — k1 named destinations / distinctive eating, k2 local culture / generic eating, k3 local parks, playgrounds, arcades, plain bars, fast food (never offered unless nothing else within ~15 miles: any=1). Chains found in the data itself: a name or a website domain shared by ≥ chain_national rows nationwide = 2 (never offered unless any=1), ≥ chain_multi = 1 (offered last). Grocery is never offered. The destination bucket (Wikidata, fame = sitelinks) is merged by the build from us-destinations.csv. v7 (Brandon, 2026-09-06 night — \"a trash bin is still a trash bin\"): DELETE, DON'T MARK, for the far gone — any venue row last refreshed before drop_before (or never dated) leaves the file entirely (absent from the name search too; a host adds such a place by hand); a row whose own website domain is dead leaves too (dead_site.action = drop). Search-only now holds only the fresh-but-thin: living places with no phone or website below the offer floor, name-rule and label rejects, vague primaries, and eat/drink rows refreshed between drop_before and their stale_before. exclusions: ids judged by the overnight review (a cheap model reading name + labels + town: not a guest-visitable place, or a category that cannot be right) are deleted at build when exclusions.csv is on the release; inert until then.",
             "primary": {
               "restaurant": "^Dining and Drinking > Restaurant",
               "cafe": "^Dining and Drinking > (Cafe, Coffee, and Tea House|Bakery|Dessert Shop|Donut Shop|Creperie|Bagel Shop)",
@@ -109,23 +121,25 @@ jobs:
               "grocery": "2023-01-01",
               "winery": "2021-01-01",
               "park": "2021-01-01",
-              "museum": "2021-01-01"
+              "museum": "2021-01-01",
+              "destination": "1900-01-01"
             },
+            "drop_before": "2021-01-01",
             "offer_floor": {
               "restaurant": 3,
               "cafe": 3,
               "grocery": 3,
               "winery": 2,
               "park": 2,
-              "museum": 2
+              "museum": 2,
+              "destination": 0
             },
             "search_only": [
               "stale",
               "name",
               "low-q",
               "vague",
-              "label",
-              "dead-site"
+              "label"
             ],
             "demote_primary": "^(Landmarks and Outdoors > Other Great Outdoors|Landmarks and Outdoors|Arts and Entertainment|Dining and Drinking|Retail)$",
             "reject_name_outdoors": "(?i)\\b(citgo|shell|exxon|chevron|valero|marathon|sunoco|texaco|mobil|phillips 66|conoco|speedway|wawa|sheetz|buc-ee'?s|quiktrip|racetrac|pilot travel|love'?s travel|casey'?s|kum & go|circle k|gas station|fuel|truck stop|self storage|storage|moving|apartments?|condominiums?|tire|auto|towing|rental|realty|real estate|dental|clinic|pharmacy|bank|credit union|insurance|funeral|cemetery services)\\b",
@@ -137,7 +151,34 @@ jobs:
               ],
               "recheck_days": 90,
               "max_lookups": 600000,
-              "not_own_domain": "(^|\\.)(facebook|instagram|yelp|google|goo|bit|linktr|doordash|grubhub|ubereats|toasttab|squareup|square|clover|tripadvisor|foursquare|twitter|x|tiktok|youtube|linkedin|godaddysites|weebly|wordpress|blogspot|business|yellowpages|zomato|opentable|resy|seamless|postmates|untappd|allmenus|menupages|restaurantji|mapquest|waze|apple|amazon|wixsite|webs|homestead|sites|page|menufy|chownow|slicelife|order|cloveronline|localflavor|eventbrite|groupon)\\.(com|net|org|site|co|ly|ee|me|app|online|gl)$"
+              "not_own_domain": "(^|\\.)(facebook|instagram|yelp|google|goo|bit|linktr|doordash|grubhub|ubereats|toasttab|squareup|square|clover|tripadvisor|foursquare|twitter|x|tiktok|youtube|linkedin|godaddysites|weebly|wordpress|blogspot|business|yellowpages|zomato|opentable|resy|seamless|postmates|untappd|allmenus|menupages|restaurantji|mapquest|waze|apple|amazon|wixsite|webs|homestead|sites|page|menufy|chownow|slicelife|order|cloveronline|localflavor|eventbrite|groupon)\\.(com|net|org|site|co|ly|ee|me|app|online|gl)$",
+              "action": "drop"
+            },
+            "kind": {
+              "k1": "(National Park|State Park|Waterfall|Hiking Trail|Bike Trail|\\bTrail\\b|Scenic Lookout|Beach|Lake|Cave|Hot Spring|Botanical Garden|Sculpture Garden|Nature Preserve|Nature Reserve|Forest|Canyon|Island|River|Reservoir|Mountain|Zoo|Aquarium|Amusement Park|Water Park|Theme Park|Museum|Planetarium|Historic and Protected Site|Historic Site|Monument|Landmark|Winery|Distillery|Cidery|Meadery|Brewery|BBQ Joint|Steakhouse|Seafood|Diner|Pizzeria|Mexican|Tex-Mex|Taco|Italian|Thai|Sushi|Ramen|Japanese|Korean|Vietnamese|Indian|Greek|Mediterranean|French|Spanish|Tapas|Cuban|Caribbean|Southern|Cajun|Creole|Soul Food|Gastropub|Brunch|Breakfast|Bistro|Farm|Food Hall|Bakery|Ice Cream|Creperie|Donut|Bagel|Coffee Shop|Tea Room|Wine Bar|Beer Garden|Taproom)",
+              "k3": "(Playground|Dog Park|Picnic Area|Arcade|Bowling|Movie Theater|Mini Golf|Sports Bar|Dive Bar|Hookah|Karaoke|Strip|Night Club|Fast Food|Food Court|Cafeteria|Buffet|Sandwich Spot|Convenience Store|Gas Station|Grocery|Supermarket|Big Box)",
+              "note": "tested in order: k3 first (a Sports Bar is k3 even though 'Bar' is not listed), then k1, else k2 (Park, Garden, Art Gallery, Theater, Music Venue, Pub, Bar, Restaurant, Cafe, American Restaurant…)"
+            },
+            "chain_national": 20,
+            "chain_multi": 5,
+            "never_offer_buckets": [
+              "grocery"
+            ],
+            "destination": {
+              "min_sitelinks": 2,
+              "fame_to_q": "q = 2 + min(4, floor(log2(sitelinks)))"
+            },
+            "dropped": [
+              "junk-name",
+              "bigbox",
+              "relic",
+              "dead-site",
+              "excluded"
+            ],
+            "exclusions": {
+              "file": "exclusions.csv",
+              "columns": "id,reason",
+              "note": "written by the overnight review; deleted at build; the report lists what left and why"
             }
           }''')
 
@@ -164,6 +205,7 @@ jobs:
                        coalesce({txt('region')},'') AS region, coalesce({txt('postcode')},'') AS postcode,
                        labels, prim, bucket,
                        CASE
+                         WHEN coalesce({dat('date_refreshed')}, DATE '1900-01-01') < DATE '{RULES['drop_before']}' THEN 'relic'
                          WHEN regexp_matches(labels, {q(RULES['reject_any_label'])}) THEN 'label'
                          WHEN regexp_matches(name, {q(RULES['reject_name'])}) THEN 'name'
                          WHEN bucket IN ('park', 'museum', 'winery') AND regexp_matches(name, {q(RULES['reject_name_outdoors'])}) THEN 'name'
@@ -299,12 +341,60 @@ jobs:
               dead_ids = [pid for pid, h in id_host.items() if h in nx]
               con.execute("CREATE OR REPLACE TABLE dead_ids (id VARCHAR)")
               if dead_ids: con.executemany("INSERT INTO dead_ids VALUES (?)", [(x,) for x in dead_ids])
-              con.execute("UPDATE places SET t = 1 WHERE t = 0 AND id IN (SELECT id FROM dead_ids)")
+              if R.get('action') == 'drop':   # v7: a dead own-domain means the business is gone or rebranded — the row leaves the file
+                  con.execute("CREATE OR REPLACE TABLE dead_rows AS SELECT bucket, coalesce(ry, 0) AS ry, count(*) AS n FROM places WHERE t = 0 AND id IN (SELECT id FROM dead_ids) GROUP BY 1, 2")
+                  con.execute("DELETE FROM places WHERE t = 0 AND id IN (SELECT id FROM dead_ids)")
+              else:
+                  con.execute("UPDATE places SET t = 1 WHERE t = 0 AND id IN (SELECT id FROM dead_ids)")
               st_counts = {}
               for h in hosts: st_counts[cache.get(h, ('unchecked', 0))[0]] = st_counts.get(cache.get(h, ('unchecked', 0))[0], 0) + 1
               print(f'   domains: ' + ' · '.join(f'{k} {v:,}' for k, v in sorted(st_counts.items())) + f' · {_time.time()-t0:.0f}s')
-              print(f'   rows moved to search-only (dead site): {len(dead_ids):,}')
-              for row in con.execute("SELECT bucket, coalesce(ry, 0) AS ry, count(*) FROM places WHERE id IN (SELECT id FROM dead_ids) GROUP BY 1, 2 ORDER BY 1, 2").fetchall(): print('   ', row)
+              if R.get('action') == 'drop':
+                  print(f'   rows DELETED (dead site): {len(dead_ids):,} · by bucket and refresh year:')
+                  for row in con.execute("SELECT bucket, ry, n FROM dead_rows ORDER BY 1, 2").fetchall(): print('   ', row)
+              else:
+                  print(f'   rows moved to search-only (dead site): {len(dead_ids):,}')
+                  for row in con.execute("SELECT bucket, coalesce(ry, 0) AS ry, count(*) FROM places WHERE id IN (SELECT id FROM dead_ids) GROUP BY 1, 2 ORDER BY 1, 2").fetchall(): print('   ', row)
+
+          def apply_exclusions(con, workdir):
+              """v7: exclusions.csv (id, reason) on the release — written by the overnight review (a cheap model reading name,
+                 labels and town: not a place a guest can visit, or a category that cannot be right). Those rows leave the file.
+                 Absent file = nothing happens. The report lists what left and why."""
+              import csv
+              X = RULES.get('exclusions') or {}
+              path = os.path.join(workdir, X.get('file', 'exclusions.csv'))
+              if not os.path.exists(path): print('\n== exclusions: no exclusions.csv on the release — the review has not run yet', flush=True); return
+              rows = []
+              with open(path, newline='', encoding='utf-8') as f:
+                  for r in csv.DictReader(f):
+                      if r.get('id'): rows.append((r['id'], (r.get('reason') or '')[:40]))
+              con.execute("CREATE OR REPLACE TABLE excl (id VARCHAR, reason VARCHAR)")
+              if rows: con.executemany("INSERT INTO excl VALUES (?, ?)", rows)
+              hit = con.execute("SELECT count(*) FROM places WHERE id IN (SELECT id FROM excl)").fetchone()[0]
+              print(f'\n== exclusions: {len(rows):,} ids in exclusions.csv · {hit:,} rows in the file → deleted; by reason and bucket:', flush=True)
+              for row in con.execute("SELECT e.reason, p.bucket, count(*) FROM places p JOIN excl e ON e.id = p.id GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 40").fetchall(): print('   ', row)
+              con.execute("DELETE FROM places WHERE id IN (SELECT id FROM excl)")
+
+          def merge_destinations(con, workdir):
+              """v6: famous places from Wikidata (built by the Destinations update job → us-destinations.csv on the release):
+                 qid, name, lat, lon, kind, sitelinks. Merged as bucket 'destination', kind rank 1, fame = sitelinks,
+                 q from fame (2 + log2 sitelinks, capped at 6), never stale, offerable. The Worker answers cat=destination
+                 from the wide zoom so a famous place an hour away can be offered."""
+              import csv, math
+              con.execute("ALTER TABLE places ADD COLUMN IF NOT EXISTS fame INTEGER")
+              path = os.path.join(workdir, 'us-destinations.csv')
+              if not os.path.exists(path): print('\n== destinations: no us-destinations.csv on the release yet — run the Destinations update job once', flush=True); return
+              rows = []; minsl = int(RULES['destination']['min_sitelinks'])
+              with open(path, newline='', encoding='utf-8') as f:
+                  for r in csv.DictReader(f):
+                      try: sl = int(r['sitelinks']); lat = float(r['lat']); lon = float(r['lon'])
+                      except Exception: continue
+                      if sl < minsl or not r.get('name'): continue
+                      qv = min(6, 2 + int(math.log2(max(1, sl))))
+                      rows.append(('wd:' + r['qid'], r['name'][:80], lat, lon, '', r.get('locality', '')[:60], r.get('region', '')[:40], '', 'Destination > ' + r.get('kind', 'Landmark'), 'destination', '', qv, 0, None, 0, 1, sl))
+              con.executemany("INSERT INTO places (id, name, lat, lon, address, locality, region, postcode, labels, bucket, website, q, chain, ry, t, k, fame) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+              print(f'\n== destinations merged: {len(rows):,} famous places (sitelinks ≥ {minsl}); top 12 by fame:', flush=True)
+              for row in con.execute("SELECT name, labels, fame FROM places WHERE bucket = 'destination' ORDER BY fame DESC LIMIT 12").fetchall(): print('   ', row)
 
           def run(files, workdir, download=None, token=None):
               os.makedirs(workdir, exist_ok=True)
@@ -326,14 +416,15 @@ jobs:
                   n = con.execute("SELECT count(*) FROM cand").fetchone()[0]
                   print(f'  [{i+1}/{len(files)}] {os.path.basename(path)} → candidates so far {n:,} · {time.time()-t0:.0f}s', flush=True)
               # --- the report: what the rules did ---
-              print('\n== candidates by bucket: offerable / search-only (stale · name · low-q · vague · label) / dropped (junk · bigbox)')
+              print('\n== candidates by bucket: offerable / search-only (stale · name · low-q · vague · label) / dropped (junk · bigbox · RELIC = refreshed before %s, deleted)' % RULES['drop_before'])
               F = RULES['offer_floor']
               floor_case = 'CASE bucket ' + ' '.join(f"WHEN '{b}' THEN {F[b]}" for b in F) + ' ELSE 3 END'
               for row in con.execute(f"""
                   SELECT bucket, count(*) FILTER (WHERE rej IS NULL AND q_raw >= {floor_case}) AS offer,
                          count(*) FILTER (WHERE rej='stale') AS so_stale, count(*) FILTER (WHERE rej='name') AS so_name,
                          count(*) FILTER (WHERE rej IS NULL AND q_raw < {floor_case}) AS so_lowq, count(*) FILTER (WHERE rej='vague') AS so_vague,
-                         count(*) FILTER (WHERE rej='label') AS so_label, count(*) FILTER (WHERE rej='junk-name') AS d_junk, count(*) FILTER (WHERE rej='bigbox-not-grocery') AS d_bb
+                         count(*) FILTER (WHERE rej='label') AS so_label, count(*) FILTER (WHERE rej='junk-name') AS d_junk, count(*) FILTER (WHERE rej='bigbox-not-grocery') AS d_bb,
+                         count(*) FILTER (WHERE rej='relic') AS d_relic
                   FROM cand GROUP BY bucket ORDER BY bucket""").fetchall():
                   print('  ', row)
               print('\n== sample of rejected rows (reason · bucket · name · primary label)')
@@ -341,41 +432,73 @@ jobs:
                   print('  ', row)
               # the staleness question (is the floor 5 years or 2?): how many venue rows Foursquare last refreshed in each year,
               # counting the ones the floor rejected too, so the floor can be moved with numbers instead of guesses
-              print('\n== last refreshed, by year (venue-type rows only; "stale" = below the floor) · year · rows · of which stale')
+              print('\n== last refreshed, by year (venue-type rows only) · year · rows · search-only (stale) · DELETED (relic)')
               for row in con.execute("""
-                  SELECT coalesce(ry, 0) AS year, count(*) AS rows, count(*) FILTER (WHERE rej='stale') AS stale
-                  FROM cand WHERE rej IS NULL OR rej='stale' GROUP BY 1 ORDER BY 1""").fetchall():
+                  SELECT coalesce(ry, 0) AS year, count(*) AS rows, count(*) FILTER (WHERE rej='stale') AS stale, count(*) FILTER (WHERE rej='relic') AS relic
+                  FROM cand WHERE rej IS NULL OR rej IN ('stale', 'relic') GROUP BY 1 ORDER BY 1""").fetchall():
                   print('  ', row)
               # --- final table: kept rows, score clamped 0..6, duplicates collapsed ---
+              # v6: chains found in the data itself. A normalized name (or an own website domain) shared by ≥ chain_national rows
+              # nationwide = 2 (McDonald's, Logan's Roadhouse, Ben & Jerry's — never offered unless nothing else is near);
+              # ≥ chain_multi = 1 (a regional multi-unit, offered after single-location places). The hand list still applies.
+              con.create_function('host_of', host_of, [str], str)
+              con.execute(f"""
+                CREATE OR REPLACE TABLE chainnames AS
+                SELECT nname, count(*) AS n FROM (
+                  SELECT regexp_replace(regexp_replace(lower(name), '\\b(the|and|&|of|at|a|an)\\b', '', 'g'), '[^a-z0-9]', '', 'g') AS nname
+                  FROM cand WHERE rej IS NULL OR rej IN ('stale', 'relic', 'name', 'vague', 'label')
+                ) WHERE length(nname) >= 4 GROUP BY nname HAVING count(*) >= {RULES['chain_multi']}""")
+              con.execute(f"""
+                CREATE OR REPLACE TABLE chaindomains AS
+                SELECT host, count(*) AS n FROM (SELECT host_of(website) AS host FROM cand WHERE website <> '' AND (rej IS NULL OR rej IN ('stale', 'relic', 'name', 'vague', 'label')))
+                WHERE host <> '' AND NOT regexp_matches(host, {q(RULES['dead_site']['not_own_domain'])}) GROUP BY host HAVING count(*) >= {RULES['chain_multi']}""")
+              print('\n== chains from the data: names shared by ≥ %d rows: %s · domains shared by ≥ %d rows: %s' % (RULES['chain_multi'], con.execute('SELECT count(*) FROM chainnames').fetchone()[0], RULES['chain_multi'], con.execute('SELECT count(*) FROM chaindomains').fetchone()[0]))
+              print('   top names:', ', '.join(f'{n}×{c}' for n, c in con.execute('SELECT nname, n FROM chainnames ORDER BY n DESC LIMIT 25').fetchall()))
+              print('   top domains:', ', '.join(f'{h}×{c}' for h, c in con.execute('SELECT host, n FROM chaindomains ORDER BY n DESC LIMIT 15').fetchall()))
               g = RULES['dedupe_grid_deg']
               # v4: a stale / name-rule / low-quality row stays in the file as SEARCH-ONLY (t=1): the seeder never offers it,
-              # the host's name search still finds it. Only non-venues are dropped. Duplicates collapse across both tiers,
-              # the offerable copy winning.
+              # the host's name search still finds it. Non-venues are dropped. Duplicates collapse across both tiers, the
+              # offerable copy winning. v7: RELICS (refreshed before drop_before, or never dated) are not in the file at all.
               con.execute(f"""
                 CREATE OR REPLACE TABLE places AS
                 SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, website,
-                       greatest(0, least(6, q_raw)) AS q, chain, ry, t
+                       greatest(0, least(6, q_raw)) AS q,
+                       greatest(chain * 2, CASE WHEN cn >= {RULES['chain_national']} OR cd >= {RULES['chain_national']} THEN 2 WHEN cn >= {RULES['chain_multi']} OR cd >= {RULES['chain_multi']} THEN 1 ELSE 0 END) AS chain,
+                       ry, t,
+                       CASE WHEN regexp_matches(regexp_replace(prim, '^[^>]+>\\s*', ''), {q(RULES['kind']['k3'])}) THEN 3
+                            WHEN regexp_matches(regexp_replace(prim, '^[^>]+>\\s*', ''), {q(RULES['kind']['k1'])}) THEN 1 ELSE 2 END AS k   -- the top-level label is stripped first ("Landmarks and Outdoors" would match Landmark)
                 FROM (
                   SELECT *, row_number() OVER (
                            PARTITION BY bucket, nname, round(lat / {g}), round(lon / {g})
                            ORDER BY t ASC, q_raw DESC, coalesce(ry, 0) DESC, length(address) DESC) AS rn
                   FROM (
-                    SELECT *, regexp_replace(regexp_replace(regexp_replace(lower(name), '(bar[ -]?b[ -]?que|barbe?que|barbecue|bbq)', 'bbq', 'g'), '\\b(the|and|&|of|at|a|an)\\b', '', 'g'), '[^a-z0-9]', '', 'g') AS nname,
-                           CASE WHEN rej IS NULL AND q_raw >= {floor_case} THEN 0 ELSE 1 END AS t
-                    FROM cand WHERE rej IS NULL OR rej IN ('stale', 'name', 'vague', 'label')
+                    SELECT c.*, regexp_replace(regexp_replace(regexp_replace(lower(c.name), '(bar[ -]?b[ -]?que|barbe?que|barbecue|bbq)', 'bbq', 'g'), '\\b(the|and|&|of|at|a|an)\\b', '', 'g'), '[^a-z0-9]', '', 'g') AS nname,
+                           CASE WHEN c.rej IS NULL AND c.q_raw >= {floor_case} THEN 0 ELSE 1 END AS t,
+                           coalesce(n1.n, 0) AS cn, coalesce(d1.n, 0) AS cd
+                    FROM cand c
+                    LEFT JOIN chainnames n1 ON n1.nname = regexp_replace(regexp_replace(lower(c.name), '\\b(the|and|&|of|at|a|an)\\b', '', 'g'), '[^a-z0-9]', '', 'g')
+                    LEFT JOIN chaindomains d1 ON d1.host = host_of(c.website)
+                    WHERE c.rej IS NULL OR c.rej IN ('stale', 'name', 'vague', 'label')
                   )
                 ) WHERE rn = 1
               """)
               total = con.execute("SELECT count(*) FROM places").fetchone()[0]
               offer = con.execute("SELECT count(*) FROM places WHERE t = 0").fetchone()[0]
               dups = con.execute("SELECT count(*) FROM cand WHERE rej IS NULL OR rej IN ('stale', 'name', 'vague', 'label')").fetchone()[0] - total
-              print(f'\n== kept {total:,} places: {offer:,} offerable + {total-offer:,} search-only · {dups:,} duplicates collapsed · {time.time()-t0:.0f}s')
+              print(f'\n== kept {total:,} places before the dead-site, exclusion and destination steps: {offer:,} offerable + {total-offer:,} search-only · {dups:,} duplicates collapsed · {time.time()-t0:.0f}s')
               print('== score distribution of the offerable rows (q → places)')
               for row in con.execute("SELECT q, count(*) FROM places WHERE t = 0 GROUP BY q ORDER BY q").fetchall(): print('  ', row)
+              print('== offerable rows by bucket: kind k1 (named / distinctive) · k2 · k3 (never offered) · national chains · regional multi-units')
+              for row in con.execute("""SELECT bucket, count(*) FILTER (WHERE k = 1), count(*) FILTER (WHERE k = 2), count(*) FILTER (WHERE k = 3),
+                                               count(*) FILTER (WHERE chain = 2), count(*) FILTER (WHERE chain = 1) FROM places WHERE t = 0 GROUP BY bucket ORDER BY bucket""").fetchall(): print('  ', row)
               if os.environ.get('AUDIT_WEBSITES') == '1': audit_websites(con)
               if os.environ.get('DEAD_DOMAINS', '1') == '1': dead_domains(con, workdir)
+              apply_exclusions(con, workdir)
+              merge_destinations(con, workdir)
+              total = con.execute("SELECT count(*) FROM places").fetchone()[0]
               offer = con.execute("SELECT count(*) FROM places WHERE t = 0").fetchone()[0]
-              con.execute(f"COPY (SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, q, chain, ry, t FROM places) TO {q(os.path.join(workdir, 'us.csv'))} (HEADER, DELIMITER ',')")
+              con.execute(f"COPY (SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, q, chain, ry, t, k, fame FROM places) TO {q(os.path.join(workdir, 'us.csv'))} (HEADER, DELIMITER ',')")
+              print(f'\n== FINAL file: {total:,} places · {offer:,} offerable · {total-offer:,} search-only (fresh but thin: no phone/website, name/label/vague rejects)')
               with open(os.path.join(workdir, 'offerable.txt'), 'w') as f: f.write(str(offer))
               with open(os.path.join(workdir, 'count.txt'), 'w') as f: f.write(str(total))
               con.close()
@@ -412,14 +535,18 @@ jobs:
               try: lat, lon = float(row['lat']), float(row['lon'])
               except: continue
               props = {k: row[k] for k in ('name', 'address', 'locality', 'region', 'postcode', 'labels', 'bucket', 'id') if row.get(k)}
-              for k in ('q', 'chain', 'ry', 't'):
+              for k in ('q', 'chain', 'ry', 't', 'k', 'fame'):
                 try: props[k] = int(row[k])
                 except: pass
               if props.get('t') == 0: del props['t']      # offerable is the default; only search-only rows carry t=1
+              if props.get('chain') == 0: del props['chain']
+              if props.get('k') == 2: del props['k']      # k2 is the default kind rank
               out.write(json.dumps({'type': 'Feature', 'properties': props, 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}}, ensure_ascii=False) + '\n')
               n += 1
           print(n, 'features written')
           PY
+          # v7: the row file rides the release too (the review and the Overture evaluation read it)
+          gzip -c -6 us.csv > places.csv.gz && ls -la places.csv.gz
           rm -f us.csv
 
       - name: Build the tile file (z12 = everything; z10–11 = destinations only for wide searches)
@@ -427,7 +554,7 @@ jobs:
           set -e
           tippecanoe -o fsq-us.pmtiles -l place -n "Custom Welcome Book places" \
             -Z10 -z12 -r1 --no-feature-limit --no-tile-size-limit \
-            -j '{"place":["any",[">=","$zoom",12],["in","bucket","park","museum","winery"]]}' \
+            -j '{"place":["any",[">=","$zoom",12],["in","bucket","park","museum","winery","destination"]]}' \
             -P --force us.geojsonseq
           ls -la fsq-us.pmtiles
           rm -f us.geojsonseq
@@ -441,7 +568,7 @@ jobs:
           json.dump({'source': 'Foursquare OS Places (Apache-2.0) via huggingface.co/datasets/foursquare/fsq-os-places',
                      'release': os.environ['DT'], 'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                      'features': int(open('count.txt').read()), 'offerable': int(open('offerable.txt').read()), 'bytes': os.path.getsize('fsq-us.pmtiles'),
-                     'rules': 5, 'zooms': {'12': 'all six categories', '10-11': 'park, museum, winery only'}},
+                     'rules': 7, 'rows': 'places.csv.gz', 'zooms': {'12': 'everything', '10-11': 'park, museum, winery, destination'}},
                     open('manifest.json', 'w'), indent=2)
           print(open('manifest.json').read())
           PY
@@ -452,6 +579,6 @@ jobs:
           gh release view tiles --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create tiles --repo "$GITHUB_REPOSITORY" --title "Places tiles" \
               --notes "Nearby-places tile file for Custom Welcome Book. Contains data from Foursquare OS Places (Apache License 2.0). Rebuilt monthly."
-          gh release upload tiles fsq-us.pmtiles manifest.json --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload tiles fsq-us.pmtiles manifest.json places.csv.gz --repo "$GITHUB_REPOSITORY" --clobber
           test -f domains.csv && gh release upload tiles domains.csv --repo "$GITHUB_REPOSITORY" --clobber || echo "no domain cache to publish"
           echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/fsq-us.pmtiles"
