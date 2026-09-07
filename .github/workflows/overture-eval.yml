@@ -1,0 +1,118 @@
+name: Overture evaluation
+
+# Custom Welcome Book — "is it still open?" evaluation (2026-09-06, Brandon: explore all our options).
+# Overture Maps Places (CDLA-Permissive 2.0 / Apache 2.0) merges Meta's business pages (~58M of ~74M records), Microsoft,
+# Foursquare and others, and carries a per-record `confidence` = the likelihood the place EXISTS (not its opening status).
+# This job reads Overture straight from its public S3 bucket with DuckDB for a handful of sample areas, matches our own
+# rows (places.csv.gz from the tiles release, built by rules v7) by name + distance, and reports:
+#   · how many of our offerable rows Overture knows at all, per area and bucket
+#   · of those, how many carry a META source (an independent signal the place is real and recent)
+#   · the confidence distribution of our rows, and a sample of our offerable rows Overture rates low (likely gone)
+#   · what Overture says about the rows Brandon caught by eye (Jazz and Gym Kids, Austin Flags and Flagpole)
+# Findings only — nothing in the product changes. The log is the report; the CSV is uploaded as a run artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      overture_release:
+        description: 'Overture release to read (see docs.overturemaps.org release notes)'
+        type: string
+        default: '2026-08-19.0'
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OVERTURE_RELEASE: ${{ github.event.inputs.overture_release || '2026-08-19.0' }}
+    steps:
+      - name: Tools
+        run: python3 -m pip install --quiet duckdb
+
+      - name: Our rows (places.csv.gz from the tiles release — built by rules v7)
+        run: |
+          set -e
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/places.csv.gz" -o places.csv.gz
+          ls -la places.csv.gz
+
+      - name: Match our rows against Overture, area by area
+        run: |
+          python3 - <<'PY'
+          import duckdb, os, time, json, csv
+          REL = os.environ['OVERTURE_RELEASE']
+          SRC = f"s3://overturemaps-us-west-2/release/{REL}/theme=places/type=place/*"
+          AREAS = [
+            ('Buda / Creedmoor TX', 30.0530, -97.7780), ('Gatlinburg TN', 35.7324, -83.4699), ('Port Aransas TX', 27.8149, -97.0706),
+            ('Blue Ridge GA', 34.8642, -84.3240), ('Austin TX', 30.2668, -97.7538), ('Anaheim CA', 33.8121, -117.9190),
+            ('Bar Harbor ME', 44.3876, -68.2039), ('Sedona AZ', 34.8697, -111.7610), ('Traverse City MI', 44.7631, -85.6206), ('Asheville NC', 35.5951, -82.5515),
+          ]
+          HALF = 0.15   # degrees each way (~17 mi N–S) — the seeder's rings live inside this box
+          con = duckdb.connect()
+          con.execute("INSTALL httpfs; LOAD httpfs; SET s3_region='us-west-2'; SET threads=4;")
+          con.execute("CREATE TABLE ours AS SELECT * FROM read_csv('places.csv.gz', header=true, all_varchar=true)")
+          con.execute("ALTER TABLE ours ALTER lat TYPE DOUBLE; ALTER TABLE ours ALTER lon TYPE DOUBLE;")
+          print('our rows:', con.execute('SELECT count(*) FROM ours').fetchone()[0], flush=True)
+          NORM = lambda col: f"regexp_replace(regexp_replace(lower({col}), '\\b(the|and|&|of|at|a|an)\\b', '', 'g'), '[^a-z0-9]', '', 'g')"
+          con.execute("CREATE TABLE ov (area VARCHAR, id VARCHAR, name VARCHAR, cat VARCHAR, confidence DOUBLE, datasets VARCHAR, lat DOUBLE, lon DOUBLE, locality VARCHAR)")
+          for name, lat, lon in AREAS:
+            t0 = time.time()
+            con.execute(f"""
+              INSERT INTO ov
+              SELECT ?, id, names.primary, categories.primary, confidence,
+                     list_string_agg(list_transform(sources, s -> s.dataset)) AS datasets,
+                     (bbox.ymin + bbox.ymax) / 2, (bbox.xmin + bbox.xmax) / 2,
+                     coalesce(addresses[1].locality, '')
+              FROM read_parquet('{SRC}', hive_partitioning=1)
+              WHERE bbox.xmin BETWEEN {lon - HALF} AND {lon + HALF} AND bbox.ymin BETWEEN {lat - HALF} AND {lat + HALF}
+            """, [name])
+            n = con.execute("SELECT count(*) FROM ov WHERE area = ?", [name]).fetchone()[0]
+            print(f'  {name}: {n:,} Overture places · {time.time() - t0:.0f}s', flush=True)
+          # our rows inside each box, matched to the nearest Overture row with the same normalized name within ~150 m
+          con.execute(f"""
+            CREATE TABLE m AS
+            SELECT o.id AS our_id, o.name AS our_name, o.bucket, o.q, o.t, o.ry, a.area,
+                   v.id AS ov_id, v.confidence, v.datasets, v.cat AS ov_cat,
+                   CASE WHEN v.id IS NULL THEN NULL ELSE contains(v.datasets, 'meta') END AS meta
+            FROM ours o
+            JOIN (SELECT DISTINCT area FROM ov) a ON true
+            JOIN (SELECT * FROM (VALUES {', '.join(f"('{n}', {la}, {lo})" for n, la, lo in AREAS)}) t(area, lat, lon)) c ON c.area = a.area
+            LEFT JOIN LATERAL (
+              SELECT v.* FROM ov v
+              WHERE v.area = a.area AND {NORM('v.name')} = {NORM('o.name')}
+                AND abs(v.lat - o.lat) < 0.0015 AND abs(v.lon - o.lon) < 0.002
+              ORDER BY abs(v.lat - o.lat) + abs(v.lon - o.lon) LIMIT 1) v ON true
+            WHERE o.lat BETWEEN c.lat - {HALF} AND c.lat + {HALF} AND o.lon BETWEEN c.lon - {HALF} AND c.lon + {HALF}
+              AND o.bucket <> 'destination'
+          """)
+          print('\n== our rows in the ten boxes, by area: rows · offerable · matched in Overture · of matched with a Meta source · median confidence')
+          for r in con.execute("""SELECT area, count(*), count(*) FILTER (WHERE t = '0'), count(ov_id), count(*) FILTER (WHERE meta), round(median(confidence), 2)
+                                  FROM m GROUP BY area ORDER BY area""").fetchall(): print('  ', r)
+          print('\n== by bucket (offerable rows only): rows · matched % · Meta % · confidence < 0.5 % · confidence ≥ 0.9 %')
+          for r in con.execute("""SELECT bucket, count(*), round(100.0 * count(ov_id) / count(*)), round(100.0 * count(*) FILTER (WHERE meta) / count(*)),
+                                         round(100.0 * count(*) FILTER (WHERE confidence < 0.5) / greatest(1, count(ov_id))), round(100.0 * count(*) FILTER (WHERE confidence >= 0.9) / greatest(1, count(ov_id)))
+                                  FROM m WHERE t = '0' GROUP BY bucket ORDER BY bucket""").fetchall(): print('  ', r)
+          print('\n== by OUR refresh year (offerable rows): year · rows · matched % · Meta % — does a fresh Foursquare date predict an Overture match?')
+          for r in con.execute("""SELECT ry, count(*), round(100.0 * count(ov_id) / count(*)), round(100.0 * count(*) FILTER (WHERE meta) / count(*))
+                                  FROM m WHERE t = '0' GROUP BY ry ORDER BY ry""").fetchall(): print('  ', r)
+          print('\n== confidence distribution of our matched offerable rows (deciles)')
+          for r in con.execute("""SELECT round(confidence, 1) AS c, count(*) FROM m WHERE t = '0' AND confidence IS NOT NULL GROUP BY 1 ORDER BY 1""").fetchall(): print('  ', r)
+          print('\n== 40 of our offerable rows that Overture rates LOW (confidence < 0.5) — likely gone; read these by eye')
+          for r in con.execute("""SELECT area, bucket, our_name, ry, q, confidence, datasets, ov_cat FROM m WHERE t = '0' AND confidence < 0.5 ORDER BY confidence LIMIT 40""").fetchall(): print('  ', r)
+          print('\n== 25 of our offerable rows Overture does NOT know at all (unmatched) — a sample; some are name-spelling misses, some are gone')
+          for r in con.execute("""SELECT area, bucket, our_name, ry, q FROM m WHERE t = '0' AND ov_id IS NULL USING SAMPLE 25 ROWS""").fetchall(): print('  ', r)
+          print('\n== the rows Brandon caught by eye — what Overture says (name search across all ten boxes)')
+          for pat in ['%jazz%gym%', '%austin flags%', '%stagecoach park%', '%onion creek park%', '%jump party%']:
+            for r in con.execute("SELECT area, name, cat, confidence, datasets, locality FROM ov WHERE lower(name) LIKE ? LIMIT 5", [pat]).fetchall(): print('  ', pat, '→', r)
+          con.execute("COPY m TO 'overture-eval.csv' (HEADER, DELIMITER ',')")
+          print('\nwrote overture-eval.csv', con.execute('SELECT count(*) FROM m').fetchone()[0], 'rows')
+          PY
+
+      - name: Keep the CSV with the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: overture-eval
+          path: overture-eval.csv
