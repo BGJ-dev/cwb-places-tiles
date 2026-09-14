@@ -21,8 +21,22 @@ name: Build places tiles
 # rows last refreshed 2023–25 vs 11% among 2026 rows. Every offerable eat/drink/grocery row with its own website
 # domain is DNS-checked (NXDOMAIN on two resolvers = dead → search-only); results cached in domains.csv on the
 # release and re-checked after 90 days. Label rejections are search-only too, no longer dropped.
+# v8 (2026-09-14, Brandon: "we need to be careful here" / "fix it"): THE DEAD-DOMAIN RULE STOPS DELETING.
+#   A sample of 16 deleted businesses was researched by hand: 7 were genuinely closed, 4 were still open, 5
+#   could not be pinned down — roughly a 36% false-positive rate among those we could resolve, and EVERY open
+#   one had simply moved to a new domain (blackrock-bbq.com -> blackrockbbq.com; Jang Won renamed at the same
+#   address; Ronnie's rebranded; indochinexpress.com -> indochineexpress.com). A dead domain reliably says the
+#   DOMAIN died, not the business — and the bias falls on small independents, because a chain never loses its
+#   domain (all 15 of the biggest chain domains came back 'ok'). So: action 'flag' (search-only, reversible)
+#   instead of 'drop', and skip_refreshed_since exempts rows Foursquare confirmed this year, where run #7's own
+#   audit put the dead rate at 11% rather than 25–31%.
+#   Also v8: the "sample of rejected rows" line had NEVER printed a row — DuckDB applies USING SAMPLE before the
+#   WHERE clause, so it drew 40 rows from 3.17M candidates and then filtered them to the 0.76% that are rejects.
+#   Fixed with a subquery, and a relic sample added. And the build now writes changes.json against the previous
+#   release, so the admin bot can say what moved.
 # The rules JSON inside MIRRORS the Worker's RULES — change both, run the mirror check.
-# Runs monthly (Foursquare refreshes around the middle of each month) and on demand.
+# Runs on the 1st and the 15th, and on demand. A scheduled run before FREEZE_UNTIL (the gate job) is skipped:
+# the file must not rebuild itself under a launch.
 
 on:
   workflow_dispatch:
@@ -32,13 +46,44 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 10 16 * *'
+    - cron: '0 10 1,15 * *'
 
 permissions:
   contents: write
 
 jobs:
+  # THE FREEZE GATE. A places rebuild changes what the BUILDER offers a host; it can never change a book that is
+  # already published (a generated book carries its spots baked in and calls nothing of ours — verified
+  # 2026-09-14). Still, the data under the product must not move itself during a launch, and "remember to turn
+  # the schedule off" is the kind of thing that gets forgotten. A SCHEDULED run before FREEZE_UNTIL stops here;
+  # a hand-started run is never blocked.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.g.outputs.go }}
+    steps:
+      - id: g
+        env:
+          FREEZE_UNTIL: '2026-10-17'
+        run: |
+          if [[ "${{ github.event_name }}" != "schedule" ]]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            echo "Started by hand — the freeze does not apply."
+            exit 0
+          fi
+          TODAY=$(date -u +%Y-%m-%d)
+          if [[ "$TODAY" < "$FREEZE_UNTIL" ]]; then
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "FROZEN until $FREEZE_UNTIL (today is $TODAY). Scheduled build skipped."
+            echo "Run it by hand from the Actions tab if you actually want it now."
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            echo "Past $FREEZE_UNTIL — building."
+          fi
+
   build:
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
@@ -55,6 +100,16 @@ jobs:
           python3 -m pip install --quiet duckdb
           tippecanoe --version
 
+      # v8: the previous release's own numbers, fetched BEFORE we overwrite them, so the change report at the
+      # end has something to compare against. A missing file is normal on a first run and never fails the build.
+      - name: Remember the current file (for the change report)
+        continue-on-error: true
+        run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/tiles"
+          for f in manifest.json counts.json; do
+            curl -fsSL "$base/$f" -o "prev-$f" && echo "have prev-$f" || echo "no previous $f (fine)"
+          done
+
       - name: Find Foursquare's latest release
         id: rel
         run: |
@@ -68,7 +123,7 @@ jobs:
           print('latest Foursquare release:', dts[-1])
           PY
 
-      - name: Extract US open places in our six categories — rules v7 (download each file, classify, score, delete relics and dead sites, dedupe)
+      - name: Extract US open places in our six categories — rules v8 (download each file, classify, score, delete relics, flag dead sites, dedupe)
         env:
           DT: ${{ steps.rel.outputs.dt }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -91,7 +146,7 @@ jobs:
 
           RULES = json.loads(r'''{
             "version": 7,
-            "note": "THE category rules for the places file. Used verbatim by the build job (DuckDB, RE2 syntax) and the Worker (JS). Change here, then run the mirror check. v4: stale_before and offer_floor are PER BUCKET; a stale / name-rule / low-quality row is MARKED search-only (t=1) rather than deleted, so a host can always find it by name; only non-venues (label rejections, junk names, big-box-not-grocery) are dropped. demote_primary: a bare or vague top-level label (e.g. 'Other Great Outdoors') is search-only. reject_name_outdoors: non-destination businesses that carry an outdoors/arts label (a gas station tagged 'Other Great Outdoors', a mover tagged 'River') are search-only in park / museum / winery. v5: a row whose own website domain no longer exists (DNS NXDOMAIN, checked at build time, cached 90 days in domains.csv) is search-only in eat/drink/grocery — run #7's audit: 25–31% dead among rows last refreshed 2023–25 vs 11% among 2026 rows. Label rejections (a venue primary with an office/lodging/service secondary) are search-only too, no longer dropped. v6 (the hierarchy, Brandon 2026-09-06): kind ranks per finer label — k1 named destinations / distinctive eating, k2 local culture / generic eating, k3 local parks, playgrounds, arcades, plain bars, fast food (never offered unless nothing else within ~15 miles: any=1). Chains found in the data itself: a name or a website domain shared by ≥ chain_national rows nationwide = 2 (never offered unless any=1), ≥ chain_multi = 1 (offered last). Grocery is never offered. The destination bucket (Wikidata, fame = sitelinks) is merged by the build from us-destinations.csv. v7 (Brandon, 2026-09-06 night — \"a trash bin is still a trash bin\"): DELETE, DON'T MARK, for the far gone — any venue row last refreshed before drop_before (or never dated) leaves the file entirely (absent from the name search too; a host adds such a place by hand); a row whose own website domain is dead leaves too (dead_site.action = drop). Search-only now holds only the fresh-but-thin: living places with no phone or website below the offer floor, name-rule and label rejects, vague primaries, and eat/drink rows refreshed between drop_before and their stale_before. exclusions: ids judged by the overnight review (a cheap model reading name + labels + town: not a guest-visitable place, or a category that cannot be right) are deleted at build when exclusions.csv is on the release; inert until then.",
+            "note": "THE category rules for the places file. Used verbatim by the build job (DuckDB, RE2 syntax) and the Worker (JS). Change here, then run the mirror check. v4: stale_before and offer_floor are PER BUCKET; a stale / name-rule / low-quality row is MARKED search-only (t=1) rather than deleted, so a host can always find it by name; only non-venues (label rejections, junk names, big-box-not-grocery) are dropped. demote_primary: a bare or vague top-level label (e.g. 'Other Great Outdoors') is search-only. reject_name_outdoors: non-destination businesses that carry an outdoors/arts label (a gas station tagged 'Other Great Outdoors', a mover tagged 'River') are search-only in park / museum / winery. v5: a row whose own website domain no longer exists (DNS NXDOMAIN, checked at build time, cached 90 days in domains.csv) is search-only in eat/drink/grocery — run #7's audit: 25–31% dead among rows last refreshed 2023–25 vs 11% among 2026 rows. Label rejections (a venue primary with an office/lodging/service secondary) are search-only too, no longer dropped. v6 (the hierarchy, Brandon 2026-09-06): kind ranks per finer label — k1 named destinations / distinctive eating, k2 local culture / generic eating, k3 local parks, playgrounds, arcades, plain bars, fast food (never offered unless nothing else within ~15 miles: any=1). Chains found in the data itself: a name or a website domain shared by ≥ chain_national rows nationwide = 2 (never offered unless any=1), ≥ chain_multi = 1 (offered last). Grocery is never offered. The destination bucket (Wikidata, fame = sitelinks) is merged by the build from us-destinations.csv. v7 (Brandon, 2026-09-06 night — \"a trash bin is still a trash bin\"): DELETE, DON'T MARK, for the far gone — any venue row last refreshed before drop_before (or never dated) leaves the file entirely (absent from the name search too; a host adds such a place by hand); a row whose own website domain is dead leaves too (dead_site.action = drop). v8 (2026-09-14): that last part is WITHDRAWN — a dead domain now only DEMOTES a row to search-only (dead_site.action = flag), and rows refreshed in skip_refreshed_since or later are exempt altogether. Measured: of 16 deleted businesses researched by hand, 7 were closed, 4 were open and 5 unresolvable — and every open one had simply moved domain. The signal says the domain died, not the business, and it falls hardest on independents because chains never lose a domain. Search-only now holds only the fresh-but-thin: living places with no phone or website below the offer floor, name-rule and label rejects, vague primaries, and eat/drink rows refreshed between drop_before and their stale_before. exclusions: ids judged by the overnight review (a cheap model reading name + labels + town: not a guest-visitable place, or a category that cannot be right) are deleted at build when exclusions.csv is on the release; inert until then.",
             "primary": {
               "restaurant": "^Dining and Drinking > Restaurant",
               "cafe": "^Dining and Drinking > (Cafe, Coffee, and Tea House|Bakery|Dessert Shop|Donut Shop|Creperie|Bagel Shop)",
@@ -152,8 +207,9 @@ jobs:
               ],
               "recheck_days": 90,
               "max_lookups": 600000,
+              "skip_refreshed_since": 2026,
               "not_own_domain": "(^|\\.)(facebook|instagram|yelp|google|goo|bit|linktr|doordash|grubhub|ubereats|toasttab|squareup|square|clover|tripadvisor|foursquare|twitter|x|tiktok|youtube|linkedin|godaddysites|weebly|wordpress|blogspot|business|yellowpages|zomato|opentable|resy|seamless|postmates|untappd|allmenus|menupages|restaurantji|mapquest|waze|apple|amazon|wixsite|webs|homestead|sites|page|menufy|chownow|slicelife|order|cloveronline|localflavor|eventbrite|groupon)\\.(com|net|org|site|co|ly|ee|me|app|online|gl)$",
-              "action": "drop"
+              "action": "flag"
             },
             "kind": {
               "k1": "(National Park|State Park|Waterfall|Hiking Trail|Bike Trail|\\bTrail\\b|Scenic Lookout|Beach|Lake|Cave|Hot Spring|Botanical Garden|Sculpture Garden|Nature Preserve|Nature Reserve|Forest|Canyon|Island|River|Reservoir|Mountain|Zoo|Aquarium|Amusement Park|Water Park|Theme Park|Museum|Planetarium|Historic and Protected Site|Historic Site|Monument|Landmark|Winery|Distillery|Cidery|Meadery|Brewery|BBQ Joint|Steakhouse|Seafood|Diner|Pizzeria|Mexican|Tex-Mex|Taco|Italian|Thai|Sushi|Ramen|Japanese|Korean|Vietnamese|Indian|Greek|Mediterranean|French|Spanish|Tapas|Cuban|Caribbean|Southern|Cajun|Creole|Soul Food|Gastropub|Brunch|Breakfast|Bistro|Farm|Food Hall|Bakery|Ice Cream|Creperie|Donut|Bagel|Coffee Shop|Tea Room|Wine Bar|Beer Garden|Taproom)",
@@ -301,12 +357,13 @@ jobs:
               except ImportError:
                   print('\n== dead-domain check SKIPPED: dnspython not installed', flush=True); return
               R = RULES['dead_site']; buckets = R['buckets']; recheck = int(R.get('recheck_days', 90)) * 86400; max_lookups = int(R.get('max_lookups', 600000))
+              skip_since = R.get('skip_refreshed_since')   # v8: rows Foursquare confirmed this recently are exempt
               import re as _re; not_own = _re.compile(R['not_own_domain'])
-              rows = con.execute(f"""SELECT id, website FROM places WHERE t = 0 AND website <> '' AND bucket IN ({','.join(q(b) for b in buckets)})""").fetchall()
-              id_host = {}
-              for pid, site in rows:
+              rows = con.execute(f"""SELECT id, website, coalesce(ry, 0) AS ry FROM places WHERE t = 0 AND website <> '' AND bucket IN ({','.join(q(b) for b in buckets)})""").fetchall()
+              id_host = {}; id_ry = {}
+              for pid, site, ry in rows:
                   h = host_of(site)
-                  if h and not not_own.search(h): id_host[pid] = h
+                  if h and not not_own.search(h): id_host[pid] = h; id_ry[pid] = ry
               hosts = sorted(set(id_host.values()))
               cache_path = os.path.join(workdir, 'domains.csv'); cache = {}
               if os.path.exists(cache_path):
@@ -339,7 +396,12 @@ jobs:
                   w = csv.writer(f); w.writerow(['domain', 'status', 'checked'])
                   for h in sorted(cache): w.writerow([h, cache[h][0], cache[h][1]])
               nx = {h for h, (st, _) in cache.items() if st == 'nx'}
-              dead_ids = [pid for pid, h in id_host.items() if h in nx]
+              hit_ids = [pid for pid, h in id_host.items() if h in nx]
+              # v8: a recently-confirmed row keeps its place whatever its domain does. Run #7's audit put the dead
+              # rate at 11% for the freshest rows against 25–31% for older ones, and the hand-researched sample of
+              # 2026-09-14 found the rule wrong about 36% of the time — so it is applied only where it has evidence.
+              dead_ids = [pid for pid in hit_ids if not (skip_since and id_ry.get(pid, 0) >= int(skip_since))]
+              exempt = len(hit_ids) - len(dead_ids)
               con.execute("CREATE OR REPLACE TABLE dead_ids (id VARCHAR)")
               if dead_ids: con.executemany("INSERT INTO dead_ids VALUES (?)", [(x,) for x in dead_ids])
               if R.get('action') == 'drop':   # v7: a dead own-domain means the business is gone or rebranded — the row leaves the file
@@ -350,12 +412,19 @@ jobs:
               st_counts = {}
               for h in hosts: st_counts[cache.get(h, ('unchecked', 0))[0]] = st_counts.get(cache.get(h, ('unchecked', 0))[0], 0) + 1
               print(f'   domains: ' + ' · '.join(f'{k} {v:,}' for k, v in sorted(st_counts.items())) + f' · {_time.time()-t0:.0f}s')
+              if skip_since:
+                  print(f'   rows with a dead domain but refreshed in {skip_since} or later, LEFT ALONE: {exempt:,}')
               if R.get('action') == 'drop':
                   print(f'   rows DELETED (dead site): {len(dead_ids):,} · by bucket and refresh year:')
                   for row in con.execute("SELECT bucket, ry, n FROM dead_rows ORDER BY 1, 2").fetchall(): print('   ', row)
               else:
-                  print(f'   rows moved to search-only (dead site): {len(dead_ids):,}')
+                  print(f'   rows moved to search-only (dead site): {len(dead_ids):,} · by bucket and refresh year:')
                   for row in con.execute("SELECT bucket, coalesce(ry, 0) AS ry, count(*) FROM places WHERE id IN (SELECT id FROM dead_ids) GROUP BY 1, 2 ORDER BY 1, 2").fetchall(): print('   ', row)
+              # v8: SHOW US THE ROWS. A rule that moves tens of thousands of businesses had never printed one.
+              print('   sample of what the dead-domain rule touched (name · bucket · last refreshed · website):')
+              for row in con.execute("""SELECT name, bucket, ry, website FROM (
+                      SELECT name, bucket, coalesce(ry, 0) AS ry, website FROM places WHERE id IN (SELECT id FROM dead_ids)
+                    ) USING SAMPLE 25 ROWS""").fetchall(): print('    ', row)
 
           def apply_exclusions(con, workdir):
               """v7: exclusions.csv (id, reason) on the release — written by the overnight review (a cheap model reading name,
@@ -428,8 +497,21 @@ jobs:
                          count(*) FILTER (WHERE rej='relic') AS d_relic
                   FROM cand GROUP BY bucket ORDER BY bucket""").fetchall():
                   print('  ', row)
+              # v8: this printed NOTHING on every run from the day it was written. DuckDB applies USING SAMPLE
+              # BEFORE the WHERE clause, so it drew 40 rows out of all 3.17M candidates and then filtered them to
+              # the 0.76% that are rejects — expected yield 0.3 rows. Reproduced on a synthetic table: five trials,
+              # zero rows every time; the subquery form returns 40. Sample the FILTERED set, never the table.
               print('\n== sample of rejected rows (reason · bucket · name · primary label)')
-              for row in con.execute("SELECT rej, bucket, name, labels FROM cand WHERE rej IN ('label','junk-name','bigbox-not-grocery') USING SAMPLE 40 ROWS").fetchall():
+              for row in con.execute("""SELECT rej, bucket, name, labels FROM (
+                      SELECT rej, bucket, name, labels FROM cand WHERE rej IN ('label','junk-name','bigbox-not-grocery')
+                    ) USING SAMPLE 40 ROWS""").fetchall():
+                  print('  ', row)
+              # v8: and a look at what DELETION actually removes — the relic rule is the biggest single cut in the
+              # build (1.19M rows in run #12) and no run has ever shown us one of them.
+              print('\n== sample of RELICS deleted (bucket · name · last refreshed · primary label)')
+              for row in con.execute("""SELECT bucket, name, ry, labels FROM (
+                      SELECT bucket, name, coalesce(ry, 0) AS ry, labels FROM cand WHERE rej = 'relic'
+                    ) USING SAMPLE 15 ROWS""").fetchall():
                   print('  ', row)
               # the staleness question (is the floor 5 years or 2?): how many venue rows Foursquare last refreshed in each year,
               # counting the ones the floor rejected too, so the floor can be moved with numbers instead of guesses
@@ -502,6 +584,12 @@ jobs:
               print(f'\n== FINAL file: {total:,} places · {offer:,} offerable · {total-offer:,} search-only (fresh but thin: no phone/website, name/label/vague rejects)')
               with open(os.path.join(workdir, 'offerable.txt'), 'w') as f: f.write(str(offer))
               with open(os.path.join(workdir, 'count.txt'), 'w') as f: f.write(str(total))
+              # v8: per-bucket counts ride the release so the next build can say what moved.
+              import json as _json
+              counts = {b: {'offerable': o, 'search_only': s} for b, o, s in con.execute(
+                  "SELECT bucket, count(*) FILTER (WHERE t = 0), count(*) FILTER (WHERE t = 1) FROM places GROUP BY bucket ORDER BY bucket").fetchall()}
+              with open(os.path.join(workdir, 'counts.json'), 'w') as f:
+                  _json.dump({'total': total, 'offerable': offer, 'search_only': total - offer, 'buckets': counts}, f, indent=1)
               con.close()
               return total
 
@@ -521,6 +609,7 @@ jobs:
           total = run(files, '/mnt/work', download=download)
           import shutil; shutil.copy('/mnt/work/us.csv', 'us.csv'); shutil.copy('/mnt/work/count.txt', 'count.txt'); shutil.copy('/mnt/work/offerable.txt', 'offerable.txt')
           if os.path.exists('/mnt/work/domains.csv'): shutil.copy('/mnt/work/domains.csv', 'domains.csv')
+          shutil.copy('/mnt/work/counts.json', 'counts.json')
           print(f'{total:,} places kept from release {dt}')
           PY
           rm -rf /mnt/work/dl
@@ -569,9 +658,54 @@ jobs:
           json.dump({'source': 'Foursquare OS Places (Apache-2.0) via huggingface.co/datasets/foursquare/fsq-os-places',
                      'release': os.environ['DT'], 'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                      'features': int(open('count.txt').read()), 'offerable': int(open('offerable.txt').read()), 'bytes': os.path.getsize('fsq-us.pmtiles'),
-                     'rules': 7, 'rows': 'places.csv.gz', 'zooms': {'12': 'everything', '10-11': 'park, museum, winery, destination'}},
+                     # 'rules' is the ANSWER-TIME contract the Worker reads (bucket, t, k, chain, q, fame) and v8 does
+                     # not change it. 'build_rules' tracks the build-side table, which did.
+                     'rules': 7, 'build_rules': 8, 'rows': 'places.csv.gz', 'counts': 'counts.json',
+                     'zooms': {'12': 'everything', '10-11': 'park, museum, winery, destination'}},
                     open('manifest.json', 'w'), indent=2)
           print(open('manifest.json').read())
+          PY
+
+      # v8: what moved since last time, in a shape a human or the admin bot can read. Never fails the build —
+      # a change report is a nice-to-have and a 27-minute build must not die for it.
+      - name: Change report
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import json, os
+          def load(p):
+              try: return json.load(open(p))
+              except Exception: return None
+          pm, pc = load('prev-manifest.json'), load('prev-counts.json')
+          nm, nc = load('manifest.json'), load('counts.json')
+          out = {'built': nm.get('built'), 'release': nm.get('release'), 'previous_built': (pm or {}).get('built'),
+                 'previous_release': (pm or {}).get('release'), 'first_run': pm is None, 'buckets': {}}
+          def d(new, old): return None if old is None else new - old
+          out['total'] = {'now': nc['total'], 'was': (pc or {}).get('total'), 'change': d(nc['total'], (pc or {}).get('total'))}
+          out['offerable'] = {'now': nc['offerable'], 'was': (pc or {}).get('offerable'), 'change': d(nc['offerable'], (pc or {}).get('offerable'))}
+          out['search_only'] = {'now': nc['search_only'], 'was': (pc or {}).get('search_only'), 'change': d(nc['search_only'], (pc or {}).get('search_only'))}
+          for b, v in nc['buckets'].items():
+              was = ((pc or {}).get('buckets') or {}).get(b) or {}
+              out['buckets'][b] = {'offerable': v['offerable'], 'offerable_was': was.get('offerable'),
+                                   'offerable_change': d(v['offerable'], was.get('offerable')),
+                                   'search_only': v['search_only'], 'search_only_was': was.get('search_only')}
+          # The one thing a host could notice. A book that is already published carries its spots baked in and
+          # makes no call to us, so a rebuild cannot change it; what changes is what the BUILDER offers next time.
+          out['affects_published_books'] = False
+          out['affects_new_and_republished_books'] = True
+          json.dump(out, open('changes.json', 'w'), indent=1)
+          print(json.dumps(out, indent=1))
+          if out['first_run']:
+              print('\n== no previous release to compare against — this is the baseline.')
+          else:
+              print(f"\n== CHANGE REPORT vs the build of {out['previous_built']}")
+              for k in ('total', 'offerable', 'search_only'):
+                  r = out[k]; print(f"   {k}: {r['was']:,} -> {r['now']:,} ({r['change']:+,})")
+              print('   by bucket (offerable):')
+              for b, v in sorted(out['buckets'].items()):
+                  if v['offerable_was'] is None: print(f"   {b}: {v['offerable']:,} (new)")
+                  else: print(f"   {b}: {v['offerable_was']:,} -> {v['offerable']:,} ({v['offerable_change']:+,})")
+              print('   published books are unaffected: their places are baked in at build time.')
           PY
 
       - name: Publish as the "tiles" release (overwrites the previous file)
@@ -580,6 +714,7 @@ jobs:
           gh release view tiles --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create tiles --repo "$GITHUB_REPOSITORY" --title "Places tiles" \
               --notes "Nearby-places tile file for Custom Welcome Book. Contains data from Foursquare OS Places (Apache License 2.0). Rebuilt monthly."
-          gh release upload tiles fsq-us.pmtiles manifest.json places.csv.gz --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload tiles fsq-us.pmtiles manifest.json places.csv.gz counts.json --repo "$GITHUB_REPOSITORY" --clobber
+          test -f changes.json && gh release upload tiles changes.json --repo "$GITHUB_REPOSITORY" --clobber || echo "no change report to publish"
           test -f domains.csv && gh release upload tiles domains.csv --repo "$GITHUB_REPOSITORY" --clobber || echo "no domain cache to publish"
           echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/fsq-us.pmtiles"
