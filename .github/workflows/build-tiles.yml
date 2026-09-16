@@ -152,6 +152,7 @@ jobs:
               "cafe": "^Dining and Drinking > (Cafe, Coffee, and Tea House|Bakery|Dessert Shop|Donut Shop|Creperie|Bagel Shop)",
               "grocery": "^Retail > (Food and Beverage Retail > (Grocery Store|Supermarket|Farmers Market|Health Food Store|Butcher|Fish Market|Cheese Store|Gourmet Store|Organic Grocery|Meat and Seafood|Fruit and Vegetable Store)|Big Box Store)",
               "winery": "^Dining and Drinking > (Winery|Brewery|Distillery|Bar( > (Wine Bar|Beer Bar|Cocktail Bar|Pub|Irish Pub|Sports Bar|Dive Bar|Beer Garden|Speakeasy|Whisky Bar|Rooftop Bar|Piano Bar|Tiki Bar|Hotel Bar|Lounge|Gastropub|Taproom))?$)",
+              "_cat10_note": "v9 (2026-09-16): the guest-facing category, ADDED alongside bucket, never replacing it. bucket is the build's own plumbing (tile layers, zoom filters, stale_before, offer_floor, the Worker) and stays exactly as it was. cat is what a guest reads. The split that forced this: the winery bucket holds 189,812 rows and only 9,163 are labelled Winery -- the rest are bars, pubs, lounges and breweries. maker (you go to see it made) and drink (you go to drink) are different things to a guest and the bucket collapses them. Matched against prim, first hit wins, so the order of the keys below is the rule.",
               "park": "^Landmarks and Outdoors > (Park|Beach|Scenic Lookout|Hiking Trail|Trail|Bike Trail|Nature Preserve|Nature Reserve|Lake|Waterfall|Garden|Botanical Garden|Sculpture Garden|Forest|Mountain|River|Reservoir|Canyon|Cave|Hot Spring|Island|Bay|Harbor|Marina|Dog Park|Playground|Picnic Area|State Park|National Park|Wildlife|Other Great Outdoors)",
               "museum": "^(Arts and Entertainment > (Museum|Art Gallery|Performing Arts Venue|Movie Theater|Arcade|Bowling Alley|Zoo|Aquarium|Amusement Park|Water Park|Mini Golf Course|Planetarium|Science Museum|History Museum|Art Museum|Exhibit|Public Art)|Landmarks and Outdoors > (Historic and Protected Site|Monument|Landmark|Historic Site))"
             },
@@ -175,6 +176,17 @@ jobs:
               "restaurant": "2023-01-01",
               "cafe": "2023-01-01",
               "grocery": "2023-01-01",
+            "cat10": {
+              "maker":      "> (Winery|Brewery|Distillery|Cidery|Meadery)|Vineyard",
+              "coffee":     "Cafe, Coffee, and Tea House|> (Bakery|Donut Shop|Dessert Shop|Bagel|Juice Bar|Bubble Tea)",
+              "drink":      "^Dining and Drinking > Bar|> (Beer Garden|Pub|Taproom|Nightclub|Speakeasy|Hookah)",
+              "eat":        "^Dining and Drinking",
+              "grocery":    "Food and Beverage Retail|> (Grocery Store|Supermarket|Farmers Market|Butcher|Fish Market|Cheese Store)",
+              "outdoors":   "^Landmarks and Outdoors|> (Hiking Trail|Beach|Lake|River|Waterfall|Garden|Nature Preserve|Scenic Lookout|Campground|Harbor or Marina|Cave|Pier)|^Destination > (Mountain|Canyon|Hot Spring|Volcano|Glacier|Island|Forest|Desert|Bay|Valley|Peak|Dune|Reef|Cliff)",
+              "attraction": "> (Zoo|Aquarium|Theme Park|Water Park|Amusement Park|Tour|Observation Deck|Mini Golf|Arcade|Bowling|Casino|Botanical Garden|Golf Course|Skating Rink|Ski Area|Ski Resort|Stadium)",
+              "culture":    "> (Museum|Art Gallery|Historic|Monument|Memorial|Theater|Theatre|Music Venue|Public Art|Sculpture|Library|Opera|Concert Hall|Planetarium|Castle|Lighthouse)|Performing Arts Venue|^Arts and Entertainment|^Destination",
+              "shop":       "> (Bookstore|Gift Shop|Antique|Flea Market|Market|Craft|Souvenir)|^Retail"
+            },
               "winery": "2021-01-01",
               "park": "2021-01-01",
               "museum": "2021-01-01",
@@ -256,11 +268,16 @@ jobs:
               for k in ['restaurant', 'cafe', 'grocery', 'winery', 'park', 'museum']:
                   case += f"WHEN regexp_matches(prim, {q(P[k])}) THEN '{k}' "
               case += 'END'
+              # v9: the guest-facing ten. Additive — `bucket` above is untouched.
+              cat_case = 'CASE '
+              for k, rx in RULES['cat10'].items():
+                  cat_case += f"WHEN regexp_matches(prim, {q(rx)}) THEN '{k}' "
+              cat_case += "ELSE 'none' END
               return f"""
                 SELECT CAST(fsq_place_id AS VARCHAR) AS id, CAST(name AS VARCHAR) AS name, CAST(latitude AS DOUBLE) AS lat, CAST(longitude AS DOUBLE) AS lon,
                        coalesce({txt('address')},'') AS address, coalesce({txt('locality')},'') AS locality,
                        coalesce({txt('region')},'') AS region, coalesce({txt('postcode')},'') AS postcode,
-                       labels, prim, bucket,
+                       labels, prim, bucket, cat,
                        CASE
                          WHEN coalesce({dat('date_refreshed')}, DATE '1900-01-01') < DATE '{RULES['drop_before']}' THEN 'relic'
                          WHEN regexp_matches(labels, {q(RULES['reject_any_label'])}) THEN 'label'
@@ -286,7 +303,8 @@ jobs:
                 FROM (
                   SELECT *, array_to_string(fsq_category_labels, ' | ') AS labels,
                          coalesce(fsq_category_labels[1], '') AS prim,
-                         {case} AS bucket
+                         {case} AS bucket,
+                         {cat_case} AS cat
                   FROM ({src_sql})
                   WHERE country = 'US' AND date_closed IS NULL AND name IS NOT NULL
                     AND latitude IS NOT NULL AND longitude IS NOT NULL
@@ -450,7 +468,7 @@ jobs:
                  qid, name, lat, lon, kind, sitelinks. Merged as bucket 'destination', kind rank 1, fame = sitelinks,
                  q from fame (2 + log2 sitelinks, capped at 6), never stale, offerable. The Worker answers cat=destination
                  from the wide zoom so a famous place an hour away can be offered."""
-              import csv, math
+              import csv, math, re
               con.execute("ALTER TABLE places ADD COLUMN IF NOT EXISTS fame INTEGER")
               path = os.path.join(workdir, 'us-destinations.csv')
               if not os.path.exists(path): print('\n== destinations: no us-destinations.csv on the release yet — run the Destinations update job once', flush=True); return
@@ -461,8 +479,12 @@ jobs:
                       except Exception: continue
                       if sl < minsl or not r.get('name'): continue
                       qv = min(6, 2 + int(math.log2(max(1, sl))))
-                      rows.append(('wd:' + r['qid'], r['name'][:80], lat, lon, '', r.get('locality', '')[:60], r.get('region', '')[:40], '', 'Destination > ' + r.get('kind', 'Landmark'), 'destination', '', qv, 0, None, 0, 1, sl))
-              con.executemany("INSERT INTO places (id, name, lat, lon, address, locality, region, postcode, labels, bucket, website, q, chain, ry, t, k, fame) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                      kind = r.get('kind', 'Landmark')
+                      # v9: a guest-facing cat for famous places too. Natural features read as outdoors, the rest as culture.
+                      dcat = ('outdoors' if re.search(r'(park|mountain|lake|river|falls|canyon|beach|island|cave|volcano|glacier|forest|desert|bay|spring|valley|peak|dune|reef|cliff)', kind, re.I)
+                              else 'attraction' if re.search(r'(ski|stadium|zoo|aquarium|theme|amusement)', kind, re.I) else 'culture')
+                      rows.append(('wd:' + r['qid'], r['name'][:80], lat, lon, '', r.get('locality', '')[:60], r.get('region', '')[:40], '', 'Destination > ' + kind, 'destination', dcat, '', qv, 0, None, 0, 1, sl))
+              con.executemany("INSERT INTO places (id, name, lat, lon, address, locality, region, postcode, labels, bucket, cat, website, q, chain, ry, t, k, fame) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
               print(f'\n== destinations merged: {len(rows):,} famous places (sitelinks ≥ {minsl}); top 12 by fame:', flush=True)
               for row in con.execute("SELECT name, labels, fame FROM places WHERE bucket = 'destination' ORDER BY fame DESC LIMIT 12").fetchall(): print('   ', row)
 
@@ -470,7 +492,7 @@ jobs:
               os.makedirs(workdir, exist_ok=True)
               con = duckdb.connect(os.path.join(workdir, 'places.duckdb'))
               con.execute("SET threads=4; SET memory_limit='4GB'; SET preserve_insertion_order=false;")
-              con.execute("CREATE OR REPLACE TABLE cand (id VARCHAR, name VARCHAR, lat DOUBLE, lon DOUBLE, address VARCHAR, locality VARCHAR, region VARCHAR, postcode VARCHAR, labels VARCHAR, prim VARCHAR, bucket VARCHAR, rej VARCHAR, website VARCHAR, q_raw INTEGER, chain INTEGER, ry INTEGER)")
+              con.execute("CREATE OR REPLACE TABLE cand (id VARCHAR, name VARCHAR, lat DOUBLE, lon DOUBLE, address VARCHAR, locality VARCHAR, region VARCHAR, postcode VARCHAR, labels VARCHAR, prim VARCHAR, bucket VARCHAR, cat VARCHAR, rej VARCHAR, website VARCHAR, q_raw INTEGER, chain INTEGER, ry INTEGER)")
               t0 = time.time(); cols = None
               for i, path in enumerate(files):
                   local = download(path) if download else path
@@ -544,7 +566,7 @@ jobs:
               # offerable copy winning. v7: RELICS (refreshed before drop_before, or never dated) are not in the file at all.
               con.execute(f"""
                 CREATE OR REPLACE TABLE places AS
-                SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, website,
+                SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, cat, website,
                        greatest(0, least(6, q_raw)) AS q,
                        greatest(chain * 2, CASE WHEN cn >= {RULES['chain_national']} OR cd >= {RULES['chain_national']} THEN 2 WHEN cn >= {RULES['chain_multi']} OR cd >= {RULES['chain_multi']} THEN 1 ELSE 0 END) AS chain,
                        ry, t,
@@ -580,7 +602,7 @@ jobs:
               merge_destinations(con, workdir)
               total = con.execute("SELECT count(*) FROM places").fetchone()[0]
               offer = con.execute("SELECT count(*) FROM places WHERE t = 0").fetchone()[0]
-              con.execute(f"COPY (SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, q, chain, ry, t, k, fame FROM places) TO {q(os.path.join(workdir, 'us.csv'))} (HEADER, DELIMITER ',')")
+              con.execute(f"COPY (SELECT id, name, lat, lon, address, locality, region, postcode, labels, bucket, cat, q, chain, ry, t, k, fame FROM places) TO {q(os.path.join(workdir, 'us.csv'))} (HEADER, DELIMITER ',')")
               print(f'\n== FINAL file: {total:,} places · {offer:,} offerable · {total-offer:,} search-only (fresh but thin: no phone/website, name/label/vague rejects)')
               with open(os.path.join(workdir, 'offerable.txt'), 'w') as f: f.write(str(offer))
               with open(os.path.join(workdir, 'count.txt'), 'w') as f: f.write(str(total))
@@ -679,8 +701,11 @@ jobs:
           pm, pc = load('prev-manifest.json'), load('prev-counts.json')
           nm, nc = load('manifest.json'), load('counts.json')
           out = {'built': nm.get('built'), 'release': nm.get('release'), 'previous_built': (pm or {}).get('built'),
-                 'previous_release': (pm or {}).get('release'), 'first_run': pm is None, 'buckets': {}}
+                 'previous_release': (pm or {}).get('release'), 'first_run': pm is None or pc is None, 'buckets': {}}
           def d(new, old): return None if old is None else new - old
+          def n(v, sign=False):   # a missing previous number must not crash the summary
+              if v is None: return '?'
+              return f'{v:+,}' if sign else f'{v:,}'
           out['total'] = {'now': nc['total'], 'was': (pc or {}).get('total'), 'change': d(nc['total'], (pc or {}).get('total'))}
           out['offerable'] = {'now': nc['offerable'], 'was': (pc or {}).get('offerable'), 'change': d(nc['offerable'], (pc or {}).get('offerable'))}
           out['search_only'] = {'now': nc['search_only'], 'was': (pc or {}).get('search_only'), 'change': d(nc['search_only'], (pc or {}).get('search_only'))}
@@ -696,15 +721,19 @@ jobs:
           json.dump(out, open('changes.json', 'w'), indent=1)
           print(json.dumps(out, indent=1))
           if out['first_run']:
-              print('\n== no previous release to compare against — this is the baseline.')
+              if pm is None and pc is None:
+                  print('\n== no previous release to compare against — this is the baseline.')
+              else:
+                  missing = 'prev-counts.json' if pc is None else 'prev-manifest.json'
+                  print(f'\n== previous release is incomplete ({missing} was not published) — no comparison this run.')
           else:
               print(f"\n== CHANGE REPORT vs the build of {out['previous_built']}")
               for k in ('total', 'offerable', 'search_only'):
-                  r = out[k]; print(f"   {k}: {r['was']:,} -> {r['now']:,} ({r['change']:+,})")
+                  r = out[k]; print(f"   {k}: {n(r['was'])} -> {n(r['now'])} ({n(r['change'], True)})")
               print('   by bucket (offerable):')
               for b, v in sorted(out['buckets'].items()):
-                  if v['offerable_was'] is None: print(f"   {b}: {v['offerable']:,} (new)")
-                  else: print(f"   {b}: {v['offerable_was']:,} -> {v['offerable']:,} ({v['offerable_change']:+,})")
+                  if v['offerable_was'] is None: print(f"   {b}: {n(v['offerable'])} (new)")
+                  else: print(f"   {b}: {n(v['offerable_was'])} -> {n(v['offerable'])} ({n(v['offerable_change'], True)})")
               print('   published books are unaffected: their places are baked in at build time.')
           PY
 
