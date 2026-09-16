@@ -28,12 +28,18 @@ jobs:
       - name: Probe
         env:
           SHARDS: ${{ inputs.shards }}
+          # fsq-os-places is a GATED dataset: listing is public, downloading is not.
+          # This is the same secret the tiles build already uses.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python3 - <<'PY'
           import duckdb, os, json, urllib.request
           from huggingface_hub import HfApi, hf_hub_download
 
-          api = HfApi(); repo = 'foursquare/fsq-os-places'
+          TOKEN = os.environ.get('HF_TOKEN') or None
+          if not TOKEN:
+              print('!! HF_TOKEN is not set. fsq-os-places is gated and the download will 401.'); raise SystemExit(1)
+          api = HfApi(token=TOKEN); repo = 'foursquare/fsq-os-places'
           rels = sorted(f.path.split('dt=')[-1].strip('/')
                         for f in api.list_repo_tree(repo, repo_type='dataset', path_in_repo='release'))
           dt = rels[-1]
@@ -45,7 +51,7 @@ jobs:
           files = files[:n]
           print(f'{len(files)} of the release shards\n', flush=True)
 
-          local = [hf_hub_download(repo, f, repo_type='dataset') for f in files]
+          local = [hf_hub_download(repo, f, repo_type='dataset', token=TOKEN) for f in files]
           con = duckdb.connect()
           q = lambda p: "'" + p.replace("'", "''") + "'"
           SRC = 'read_parquet([' + ','.join(q(p) for p in local) + '])'
