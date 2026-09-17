@@ -139,6 +139,21 @@ jobs:
             ('County Park',          ['Q5177940']),
             ('Reservoir',            ['Q131681']),
             ('Wilderness Area',      ['Q27995042']),
+            # From the second sizing run (2026-09-17). Q106695446 is THE ANSWER TO OLALLIE:
+            # Olallie Scenic Area is instance of "scenic area", a class we had never asked for,
+            # which is why it was absent -- not the sitelink floor I blamed at first.
+            #   Q106695446 scenic area -- area where a person can experience scenic beauty
+            #   Q6978245   National Scenic Area -- conservation designation used in the US
+            #   Q2324919   state forest -- government owned forest
+            #   Q113033132 state recreation area
+            # NOT added, deliberately: "protected area" (Q473972) is too broad to reason about
+            # yet, and every "Spanish mission" hit was an OVERVIEW ARTICLE, not a class you can
+            # be an instance of. The recall report on the real pull will say what the Alamo and
+            # the missions actually are, and then they go in with evidence instead of a guess.
+            ('Scenic Area',          ['Q106695446']),
+            ('National Scenic Area', ['Q6978245']),
+            ('State Forest',         ['Q2324919']),
+            ('State Recreation Area',['Q113033132']),
           ]
           # MOUNTAIN, LAKE AND BEACH ARE NOT LIKE THE OTHERS (2026-09-17, measured).
           # 90% of Mountain, 70% of Lake and 88% of Beach are items with exactly one
@@ -153,9 +168,26 @@ jobs:
           # So these three get a rule that means something instead: the item must carry an
           # image or an official website. A human bothered. Olallie Scenic Area (Q3350146)
           # carries an image; a nameless pond does not.
-          EXTRA = { 'Mountain': '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }',
-                    'Lake':     '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }',
-                    'Beach':    '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }' }
+          # MEASURED 2026-09-17, second sizing run. The rule is doing exactly what it should:
+          #   Mountain  65,580 -> 3,660      Lake  29,194 -> 1,589      Beach  2,486 -> 348
+          # and with it in place THE CAP BOUND ON NOTHING. Every class is taken whole at floor
+          # zero; no sitelink count decides anything anywhere in this file any more.
+          # That same run exposed two more classes with the bot-stub shape, so they get the
+          # same rule:
+          #   Reservoir          8,007 rows, 80% of them carrying exactly one sitelink --
+          #                      a nameless impoundment with no photo and no website is not
+          #                      somewhere a guest drives to.
+          #   Historic District 11,314 rows, 46% at exactly one sitelink, and the single
+          #                      largest class in the pull. LESS CLEAR-CUT than the others:
+          #                      American historic districts are legitimately English-only.
+          #                      So this one is a judgement I am making with an instrument
+          #                      behind it -- the recall list holds the French Quarter,
+          #                      Charleston, Old Town Albuquerque and Gruene, and if the rule
+          #                      cuts too deep the recall report will name them as misses.
+          _HUMAN_BOTHERED = '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }'
+          EXTRA = { 'Mountain': _HUMAN_BOTHERED, 'Lake': _HUMAN_BOTHERED,
+                    'Beach': _HUMAN_BOTHERED, 'Reservoir': _HUMAN_BOTHERED,
+                    'Historic District': _HUMAN_BOTHERED }
           # THE FLOOR IS MEASURED, NOT GUESSED (2026-09-17).
           # It used to be MIN_SL = {Mountain: 6, Lake: 4, Theater: 4, Stadium: 4, Museum: 3},
           # base 2 -- numbers picked by hand back when sitelinks were the only quality signal
