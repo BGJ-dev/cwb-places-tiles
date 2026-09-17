@@ -244,7 +244,7 @@ jobs:
             'State Forest':'outdoors','State Recreation Area':'outdoors',
             # named by the first recall report, 2026-09-17
             'Mission':'culture','NRHP District':'culture',
-            'Urban Park':'outdoors','Bay':'outdoors',
+            'Urban Park':'outdoors','Bay':'outdoors','Resort':'attraction',
           }
           # Deliberately not wave 1. A stadium is an event with a date; a ski area needs the
           # season field to be honest in print. Both are in the puller's output on purpose --
