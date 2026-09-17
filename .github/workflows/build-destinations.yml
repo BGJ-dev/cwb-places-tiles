@@ -184,10 +184,54 @@ jobs:
           #                      behind it -- the recall list holds the French Quarter,
           #                      Charleston, Old Town Albuquerque and Gruene, and if the rule
           #                      cuts too deep the recall report will name them as misses.
+          # READ, 2026-09-17, because Brandon asked for the deletes to be sampled and checked
+          # before 62,000 rows went in the bin. 150 dropped names read by hand. The rule holds
+          # on three classes and FAILS on two:
+          #
+          #   Lake      KEEP THE RULE. Dropped: Coon Lake, Catfish Lake, Mill Pond, Pitcher
+          #             Lake, Mardow Lake (Yukon-Koyukuk Census Area). Nameless ponds, exactly
+          #             as intended. 29,194 -> 1,589.
+          #   Mountain  KEEP THE RULE. Dropped: Beech Hill, Beede Hill, Spencer Hill, Kunde
+          #             Knoll, Kurn Hattin Hill -- GNIS hills. Kept: Cadillac Mountain,
+          #             Electric Peak, Campbell Hill. 65,580 -> 3,660.
+          #   Reservoir KEEP THE RULE. Dropped: "Monte Vista Poultry Detention Pond", Dunlap
+          #             Pond, Brewer Reservoir. It also drops Lake Mineral Wells and Lake
+          #             Minatare -- but those are STATE PARKS and arrive under that class, so
+          #             the destination is not lost, only the impoundment row. 8,007 -> 1,079.
+          #
+          #   Beach     RULE KEPT -- after I first removed it and Brandon overturned that.
+          #             I had read the dropped list, recognised Ho'okena, Second Beach and
+          #             Moonstone Beach as real places, and called the rule broken. He asked
+          #             what those ROWS actually are. Checked, one by one:
+          #               Ho'okena beach -- a 300-word stub about a declined port village,
+          #                 "now known for a beach park", no photo. The destination is the
+          #                 PARK, which has no Wikipedia article at all.
+          #               Second Beach -- "Second Beach" is a DISAMBIGUATION page; the Olympic
+          #                 one is a trail destination inside Olympic National Park, and the
+          #                 park is already in the pull.
+          #               Moonstone Beach -- an article about REDONDO BEACH's former tourism
+          #                 era, not the Cambria destination I had assumed from the name.
+          #             Three for three: the rule was dropping thin feature stubs, and where a
+          #             real destination was involved it arrives under another class. I had
+          #             judged the rows by whether the NAME sounded like somewhere real.
+          #   Historic  RULE REMOVED, but the class stays -- gated on renown instead, which is
+          #   District  the ONE place in this file where a sitelink count is still legitimate,
+          #             and only because Brandon's product rule for this class IS about renown:
+          #             "if a historic district is worth visiting, there will be enough
+          #             attractions within the district to draw attention to it. Naming the
+          #             district itself would compete with the actual destinations... It would
+          #             be good to keep the really famous or noteworthy districts, like The
+          #             French Quarter." A district earns a slot only when naming it beats
+          #             naming what is inside it, and that is exactly what many languages
+          #             writing about it measures. At >= 6 sitelinks the class goes 11,314 ->
+          #             101. The image rule was no use here anyway: it cut 16% arbitrarily,
+          #             dropping Clarksdale and Danville while keeping three South Main Streets.
           _HUMAN_BOTHERED = '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }'
           EXTRA = { 'Mountain': _HUMAN_BOTHERED, 'Lake': _HUMAN_BOTHERED,
-                    'Beach': _HUMAN_BOTHERED, 'Reservoir': _HUMAN_BOTHERED,
-                    'Historic District': _HUMAN_BOTHERED }
+                    'Beach': _HUMAN_BOTHERED, 'Reservoir': _HUMAN_BOTHERED }
+          # The one surviving sitelink gate, for the one class whose product rule is renown.
+          # Everywhere else in this file sitelinks decide nothing.
+          FLOOR_OVERRIDE = { 'Historic District': 6 }
           # THE FLOOR IS MEASURED, NOT GUESSED (2026-09-17).
           # It used to be MIN_SL = {Mountain: 6, Lake: 4, Theater: 4, Stadium: 4, Museum: 3},
           # base 2 -- numbers picked by hand back when sitelinks were the only quality signal
@@ -367,6 +411,11 @@ jobs:
             'Biltmore Winery', "Jack Daniel's Distillery",
             'Buffalo Trace Distillery', "Maker's Mark Distillery",
             'Sierra Nevada Brewing Co.', 'Napa Valley Wine Train',
+            'Hoʻokena Beach Park', 'Cape Disappointment State Park',
+            'Siesta Key Beach', 'Coronado Beach',
+            'Lake Chelan', 'Flathead Lake',
+            'Lake Powell', 'Lake Mead National Recreation Area',
+            'French Quarter', 'Vieux Carre Historic District',
             "Jacob's Well Natural Area", 'Hamilton Pool Preserve',
             'Blanco State Park', 'Wimberley Blue Hole Regional Park',
             'Palo Duro Canyon State Park', 'Caddo Lake State Park',
@@ -432,11 +481,13 @@ jobs:
                 if c is None:
                   print(f'{(kind + " " + cls)[:26].ljust(26)}  (the endpoint did not answer)')
                   time.sleep(2); continue
-                f = pick_floor(c)
-                mark = '  <<< CAP BINDS' if f > 0 else ''
+                f = FLOOR_OVERRIDE.get(kind) or pick_floor(c)
+                mark = ('  (renown gate, by design)' if kind in FLOOR_OVERRIDE
+                        else '  <<< CAP BINDS' if f > 0 else '')
                 if kind in EXTRA: mark += '  (image-or-website rule applied)'
                 print(f'{(kind + " " + cls)[:26].ljust(26)}' + ''.join(f'{c.get(x,0):,}'.rjust(9) for x in FLOOR_STEPS) + f'   >={f}{mark}')
-                if f > 0: capped.append((kind, cls, c.get(0, 0), c.get(f, 0), f))
+                if f > 0 and kind not in FLOOR_OVERRIDE:
+                  capped.append((kind, cls, c.get(0, 0), c.get(f, 0), f))
                 tot_now += c.get(2, 0); tot_new += c.get(f, 0)
                 time.sleep(2)
             # THE SANITY CHECK ON THE EXCLUSION RULES. Brandon asked for it by name, and he
@@ -506,7 +557,7 @@ jobs:
               if counts is None:
                 minsl = 2; print(f'      {kind} {qid}: no count, using the old floor of 2', flush=True)
               else:
-                minsl = pick_floor(counts)
+                minsl = FLOOR_OVERRIDE.get(kind) or pick_floor(counts)
                 note = '  <<< CAP BINDS, fame is deciding here' if minsl > 0 else ''
                 print(f'      {kind} {qid}: {counts.get(0,0):,} in all, floor >={minsl} takes {counts.get(minsl,0):,}{note}', flush=True)
               # PAGED, AND ORDERED. The old query was a bare LIMIT 20000 with no ORDER BY: if a
