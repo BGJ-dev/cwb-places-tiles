@@ -188,21 +188,21 @@ jobs:
               "restaurant": "2023-01-01",
               "cafe": "2023-01-01",
               "grocery": "2023-01-01",
+              "winery": "2021-01-01",
+              "park": "2021-01-01",
+              "museum": "2021-01-01",
+              "destination": "1900-01-01"
+            },
             "cat10": {
               "maker":      "> (Winery|Brewery|Distillery|Cidery|Meadery)|Vineyard",
               "coffee":     "Cafe, Coffee, and Tea House|> (Bakery|Donut Shop|Dessert Shop|Bagel|Juice Bar|Bubble Tea)",
               "drink":      "^Dining and Drinking > Bar|> (Beer Garden|Pub|Taproom|Nightclub|Speakeasy|Hookah)",
               "eat":        "^Dining and Drinking",
-              "grocery":    "Food and Beverage Retail|> (Grocery Store|Supermarket|Farmers Market|Butcher|Fish Market|Cheese Store)",
+              "grocery":    "labels:Food and Beverage Retail|> (Grocery Store|Supermarket|Farmers Market|Butcher|Fish Market|Cheese Store)",
               "outdoors":   "^Landmarks and Outdoors|> (Hiking Trail|Beach|Lake|River|Waterfall|Garden|Nature Preserve|Scenic Lookout|Campground|Harbor or Marina|Cave|Pier)|^Destination > (Mountain|Canyon|Hot Spring|Volcano|Glacier|Island|Forest|Desert|Bay|Valley|Peak|Dune|Reef|Cliff)",
               "attraction": "> (Zoo|Aquarium|Theme Park|Water Park|Amusement Park|Tour|Observation Deck|Mini Golf|Arcade|Bowling|Casino|Botanical Garden|Golf Course|Skating Rink|Ski Area|Ski Resort|Stadium)",
               "culture":    "> (Museum|Art Gallery|Historic|Monument|Memorial|Theater|Theatre|Music Venue|Public Art|Sculpture|Library|Opera|Concert Hall|Planetarium|Castle|Lighthouse)|Performing Arts Venue|^Arts and Entertainment|^Destination",
               "shop":       "> (Bookstore|Gift Shop|Antique|Flea Market|Market|Craft|Souvenir)|^Retail"
-            },
-              "winery": "2021-01-01",
-              "park": "2021-01-01",
-              "museum": "2021-01-01",
-              "destination": "1900-01-01"
             },
             "drop_before": "2021-01-01",
             "offer_floor": {
@@ -283,7 +283,12 @@ jobs:
               # v9: the guest-facing ten. Additive — `bucket` above is untouched.
               cat_case = 'CASE '
               for k, rx in RULES['cat10'].items():
-                  cat_case += f"WHEN regexp_matches(prim, {q(rx)}) THEN '{k}' "
+                  # a rule prefixed 'labels:' is matched against the WHOLE label list, not just the
+                  # first one. Walmart Supercenter leads with 'Retail > Big Box Store' and carries
+                  # 'Supermarket' second; on the first label alone a guest's grocery store came out
+                  # as a shop. Rules stay in order, so a Dining-and-Drinking row never reaches these.
+                  col, pat = ('labels', rx[7:]) if rx.startswith('labels:') else ('prim', rx)
+                  cat_case += f"WHEN regexp_matches({col}, {q(pat)}) THEN '{k}' "
               cat_case += "ELSE 'none' END"
               return f"""
                 SELECT CAST(fsq_place_id AS VARCHAR) AS id, CAST(name AS VARCHAR) AS name, CAST(latitude AS DOUBLE) AS lat, CAST(longitude AS DOUBLE) AS lon,
