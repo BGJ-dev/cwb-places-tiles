@@ -172,7 +172,6 @@ jobs:
           PY
 
       - name: Clear, categorise, and build the database
-        env:
         run: |
           python3 - <<'PY'
           import csv, sqlite3, os, json, collections
