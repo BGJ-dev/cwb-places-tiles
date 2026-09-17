@@ -16,6 +16,10 @@ on:
         description: 'Look up Wikidata classes we might be missing, print candidates, and stop. ~1 min, publishes nothing.'
         type: boolean
         default: false
+      sizing:
+        description: 'Count how many places each class has at each sitelink floor, and look up the classes we are still missing. Prints numbers, publishes nothing. ~5 min.'
+        type: boolean
+        default: false
   schedule:
     - cron: '0 10 14 * *'
 
@@ -32,6 +36,7 @@ jobs:
       - name: Ask Wikidata, kind by kind
         env:
           DISCOVER: ${{ inputs.discover }}
+          SIZING: ${{ inputs.sizing }}
         run: |
           python3 - <<'PY'
           import json, time, urllib.request, urllib.parse, csv, sys, re, os
@@ -102,7 +107,20 @@ jobs:
             ('National Scenic Trail',    ['Q12063557']),
             ('Wildlife Refuge',          ['Q1410668']),
           ]
-          MIN_SL = { 'Mountain': 6, 'Lake': 4, 'Theater': 4, 'Stadium': 4, 'Museum': 3 }   # busy classes: a higher fame bar
+          # THE FLOOR IS MEASURED, NOT GUESSED (2026-09-17).
+          # It used to be MIN_SL = {Mountain: 6, Lake: 4, Theater: 4, Stadium: 4, Museum: 3},
+          # base 2 -- numbers picked by hand back when sitelinks were the only quality signal
+          # we had. They were never a quality gate; they were a guess, and they silently
+          # removed real places (Olallie Lake, which English Wikipedia writes about and three
+          # other languages do not). A model now reads every row, so sitelinks decide NOTHING
+          # about what ships.
+          # What the floor is FOR is keeping a single query inside what the endpoint will
+          # answer. So it is now derived per class from a counting query: take the LOWEST
+          # floor at which the class still fits under CLASS_CAP. Small classes get 0 and we
+          # see everything; only a genuinely huge class is ever trimmed, and the log says so.
+          CLASS_CAP = 30000      # rows we are willing to take from one class
+          PAGE      = 10000      # rows per query; the pull pages until the class is exhausted
+          FLOOR_STEPS = [0, 1, 2, 3, 4, 6, 8, 12]
           def sparql(q, tries=4):
             data = urllib.parse.urlencode({'query': q, 'format': 'json'}).encode()
             for a in range(tries):
@@ -149,6 +167,54 @@ jobs:
             'science museum', 'arboretum', 'scenic byway', 'pedestrian street',
             'state historic site', 'county park', 'reservoir', 'wilderness area',
           ]
+          def count_by_floor(path, qid):
+            """How many US items with coordinates does this class have at each floor?
+               ONE aggregate query per class -- no rows come back, so it is cheap and it
+               cannot truncate. Returns {floor: count} or None if the endpoint refused."""
+            sums = ' '.join(f'(SUM(IF(?sl >= {f}, 1, 0)) AS ?f{f})' for f in FLOOR_STEPS)
+            q = f'''SELECT {sums} WHERE {{
+              ?item {path} wd:{qid} ; wdt:P17 wd:Q30 ; wdt:P625 ?coord ; wikibase:sitelinks ?sl .
+            }}'''
+            r = sparql(q)
+            if not r: return None
+            b = r[0]
+            return {f: int(b[f'f{f}']['value']) for f in FLOOR_STEPS if f'f{f}' in b}
+
+          def pick_floor(counts):
+            """The lowest floor that fits under the cap. 0 whenever the class is small enough."""
+            for f in FLOOR_STEPS:
+              if counts.get(f, 10**9) <= CLASS_CAP: return f
+            return FLOOR_STEPS[-1]
+
+          if os.environ.get('SIZING') == 'true':
+            print('== sizing run -- counting only. Nothing is pulled and nothing is published.\n')
+            print(f'   cap per class: {CLASS_CAP:,}\n')
+            hdr = 'class'.ljust(26) + ''.join(f'>={f}'.rjust(9) for f in FLOOR_STEPS) + '   floor'
+            print(hdr); print('-' * len(hdr))
+            tot_now, tot_new = 0, 0
+            for kind, classes in KINDS:
+              for cls in classes:
+                walk = cls.endswith('*'); qid = cls.rstrip('*')
+                path = 'wdt:P31/wdt:P279*' if walk else 'wdt:P31'
+                c = count_by_floor(path, qid)
+                if c is None:
+                  print(f'{(kind + " " + cls)[:26].ljust(26)}  (the endpoint did not answer)')
+                  time.sleep(2); continue
+                f = pick_floor(c)
+                print(f'{(kind + " " + cls)[:26].ljust(26)}' + ''.join(f'{c.get(x,0):,}'.rjust(9) for x in FLOOR_STEPS) + f'   >={f}')
+                tot_now += c.get(2, 0); tot_new += c.get(f, 0)
+                time.sleep(2)
+            print(f'\n== at the OLD base floor of 2 these classes hold {tot_now:,} rows.')
+            print(f'== at the measured floors they hold {tot_new:,}. That number sizes the judging run.')
+            print('\n-- and the classes we are still missing --')
+            for term in WANTED[10:]:
+              print(f'  {term}')
+              for h in candidates(term):
+                print(f"      {h['id']:11s} {h.get('label','')[:38]:40s} {h.get('description','')[:64]}")
+              time.sleep(3)
+            print('\n== done. Nothing was pulled and nothing was published.')
+            sys.exit(0)
+
           if os.environ.get('DISCOVER') == 'true':
             print('== class discovery — nothing is pulled or published\n')
             for term in WANTED:
@@ -161,19 +227,38 @@ jobs:
 
           seen = {}; report = []
           for kind, classes in KINDS:
-            minsl = MIN_SL.get(kind, 2); got = 0
+            got = 0
             for cls in classes:
               walk = cls.endswith('*'); qid = cls.rstrip('*')
               path = 'wdt:P31/wdt:P279*' if walk else 'wdt:P31'
-              q = f'''SELECT ?item ?itemLabel ?coord ?sl ?adminLabel WHERE {{
-                ?item {path} wd:{qid} ; wdt:P17 wd:Q30 ; wdt:P625 ?coord ; wikibase:sitelinks ?sl .
-                FILTER(?sl >= {minsl})
-                OPTIONAL {{ ?item wdt:P131 ?admin . }}
-                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
-              }} LIMIT 20000'''
-              rows = sparql(q)
-              if rows is None and walk:                      # the subclass walk timed out: fall back to direct instances
-                rows = sparql(q.replace('wdt:P31/wdt:P279*', 'wdt:P31'))
+              # Count first, then choose the floor from the count. A small class gets 0 and we
+              # take everything it has. If the counting query will not answer, fall back to 2 --
+              # the old base -- and say so, rather than guessing something new.
+              counts = count_by_floor(path, qid)
+              if counts is None:
+                minsl = 2; print(f'      {kind} {qid}: no count, using the old floor of 2', flush=True)
+              else:
+                minsl = pick_floor(counts)
+                print(f'      {kind} {qid}: {counts.get(0,0):,} in all, floor >={minsl} takes {counts.get(minsl,0):,}', flush=True)
+              # PAGED, AND ORDERED. The old query was a bare LIMIT 20000 with no ORDER BY: if a
+              # class ever exceeded it we got an arbitrary 20,000 rows and no error at all.
+              rows, off = [], 0
+              while True:
+                q = f'''SELECT ?item ?itemLabel ?coord ?sl ?adminLabel WHERE {{
+                  ?item {path} wd:{qid} ; wdt:P17 wd:Q30 ; wdt:P625 ?coord ; wikibase:sitelinks ?sl .
+                  FILTER(?sl >= {minsl})
+                  OPTIONAL {{ ?item wdt:P131 ?admin . }}
+                  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
+                }} ORDER BY ?item LIMIT {PAGE} OFFSET {off}'''
+                page = sparql(q)
+                if page is None and walk and off == 0:        # the subclass walk timed out: fall back to direct instances
+                  page = sparql(q.replace('wdt:P31/wdt:P279*', 'wdt:P31'))
+                if page is None:
+                  if off == 0: rows = None
+                  break
+                rows.extend(page); off += PAGE
+                if len(page) < PAGE or off >= CLASS_CAP: break
+                time.sleep(1.5)
               if rows is None: report.append((kind, qid, 'FAILED')); continue
               n = 0
               for b in rows:
@@ -184,13 +269,20 @@ jobs:
                 if not name or name == item: continue             # no English label → not a place a guest will know
                 sl = int(b['sl']['value']); lon, lat = float(m.group(1)), float(m.group(2))
                 if not (24 <= lat <= 72 and -180 <= lon <= -65): continue   # US bounds incl. Alaska/Hawaii; drops stray coordinates
-                cur = seen.get(item)
-                if cur is None or sl > cur['sitelinks']:
-                  seen[item] = {'qid': item, 'name': name[:80], 'lat': round(lat, 5), 'lon': round(lon, 5), 'kind': cur['kind'] if cur else kind, 'sitelinks': sl, 'locality': b.get('adminLabel', {}).get('value', '')[:60], 'region': ''}
-                n += 1
+                # THE FIRST KIND WINS. This used to keep whichever copy of the row carried more
+                # sitelinks, which let fame decide what KIND a place was filed under -- a thing
+                # sitelinks have no bearing on. KINDS is ordered most-specific-first, so the
+                # first class to claim an item is the right one (a National Park that is also
+                # typed as a Mountain stays a National Park).
+                if item not in seen:
+                  seen[item] = {'qid': item, 'name': name[:80], 'lat': round(lat, 5), 'lon': round(lon, 5), 'kind': kind, 'sitelinks': sl, 'locality': b.get('adminLabel', {}).get('value', '')[:60], 'region': ''}
+                  n += 1
               got += n; report.append((kind, qid, n)); time.sleep(1.5)
             print(f'  {kind:20s} {got:6d}', flush=True)
-          rows = sorted(seen.values(), key=lambda r: -r['sitelinks'])
+          # Ordered by name. It used to be ordered by sitelinks, which made the file itself
+          # a fame ranking -- so any truncation anywhere downstream quietly kept the famous
+          # ones and dropped the rest. Nothing downstream should read order as meaning.
+          rows = sorted(seen.values(), key=lambda r: (r['kind'], r['name']))
           with open('us-destinations.csv', 'w', newline='', encoding='utf-8') as f:
             w = csv.DictWriter(f, fieldnames=['qid', 'name', 'lat', 'lon', 'kind', 'sitelinks', 'locality', 'region']); w.writeheader()
             for r in rows: w.writerow(r)
@@ -214,8 +306,9 @@ jobs:
               time.sleep(1)
           else:
             print('\n== every class returned at least one row')
-          print('\n== the 30 most famous:')
-          for r in rows[:30]: print(f'   {r["sitelinks"]:4d}  {r["name"]}  ({r["kind"]}, {r["locality"]})')
+          print('\n== a sample of 30, evenly spread through the file (NOT a ranking):')
+          step = max(1, len(rows) // 30)
+          for r in rows[::step][:30]: print(f'   {r["sitelinks"]:4d} sl  {r["name"]}  ({r["kind"]}, {r["locality"]})')
           assert len(rows) > 1000, 'too few destinations — the queries are not answering; the previous release file stays'
           PY
 
