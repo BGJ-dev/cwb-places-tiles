@@ -33,9 +33,6 @@ jobs:
           # kind label → Wikidata classes (direct instance-of); '*' after a QID also walks subclasses (P279*)
           KINDS = [
             ('National Park',        ['Q46169']),
-            ('State Park',           ['Q1140471', 'Q1216927']),
-            ('National Monument',    ['Q893485']),
-            ('National Forest',      ['Q1073855']),
             ('Nature Preserve',      ['Q179049', 'Q1310307']),
             ('Waterfall',            ['Q34038']),
             ('Beach',                ['Q40080']),
@@ -56,10 +53,25 @@ jobs:
             ('Ski Area',             ['Q130003']),
             ('Winery',               ['Q156362']),
             ('Brewery',              ['Q131734']),
-            ('Distillery',           ['Q18783']),
             ('Stadium',              ['Q483110']),
             ('Theater',              ['Q11635', 'Q24354']),
             ('Tourist Attraction',   ['Q570116']),
+            # These four answered with ZERO for weeks — the QIDs were simply wrong, and a
+            # zero is not a failure so nothing shouted about it. State parks were the biggest
+            # hole in a day-trip layer: thousands of them, and we had none.
+            # The QIDs below are not guesses: run #4's zero-report asked Wikidata what the
+            # right class was and these came back with descriptions that name the US
+            # explicitly. The old values are gone rather than kept alongside, because a QID
+            # that returns nothing is just a wasted query.
+            #   Q1761072  state park — protected area managed at the federated state level
+            #             (walked with *, so per-state subclasses like "Oregon state park" come too)
+            #   Q893775   National Monument of the United States
+            #   Q612741   United States National Forest
+            #   Q1251750  distillery — facility that manufactures alcoholic beverages
+            ('State Park',           ['Q1761072*']),
+            ('National Monument',    ['Q893775']),
+            ('National Forest',      ['Q612741']),
+            ('Distillery',           ['Q1251750']),
           ]
           MIN_SL = { 'Mountain': 6, 'Lake': 4, 'Theater': 4, 'Stadium': 4, 'Museum': 3 }   # busy classes: a higher fame bar
           def sparql(q, tries=4):
