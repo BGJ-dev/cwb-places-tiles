@@ -106,7 +106,56 @@ jobs:
             ('National Battlefield',     ['Q35432882']),
             ('National Scenic Trail',    ['Q12063557']),
             ('Wildlife Refuge',          ['Q1410668']),
+            # Fifteen classes from the 2026-09-17 sizing run's discovery pass. Every
+            # description below was read before the QID went in; none is a guess, and the
+            # one term that came back empty (Spanish mission) is in WANTED, not here.
+            #   Q2232001  show cave -- cave made accessible to the general public
+            #   Q740326   water park -- recreational facility with water attractions
+            #   Q15243209 historic district -- section of a city with older buildings
+            #   Q9259     World Heritage Site -- listed by UNESCO
+            #   Q1785071  fort -- military construction for defensive warfare
+            #   Q177305   observation deck -- elevated sightseeing platform
+            #   Q148319   planetarium
+            #   Q588140   science museum (also reachable under Museum's subclass walk)
+            #   Q272231   arboretum (also reachable under Botanical Garden)
+            #   Q1406331  scenic route -- designated path, road or waterway of interest
+            #   Q62685721 pedestrian street -- street reserved mainly for pedestrians
+            #   Q28042933 state historic site in the United States
+            #   Q5177940  county park -- park managed by a county
+            #   Q131681   reservoir -- artificial lake impounded by a dam
+            #   Q27995042 United States Wilderness Area -- congressionally designated
+            ('Show Cave',            ['Q2232001']),
+            ('Water Park',           ['Q740326']),
+            ('Historic District',    ['Q15243209']),
+            ('World Heritage Site',  ['Q9259']),
+            ('Fort',                 ['Q1785071']),
+            ('Observation Deck',     ['Q177305']),
+            ('Planetarium',          ['Q148319']),
+            ('Science Museum',       ['Q588140']),
+            ('Arboretum',            ['Q272231']),
+            ('Scenic Route',         ['Q1406331']),
+            ('Pedestrian Street',    ['Q62685721']),
+            ('State Historic Site',  ['Q28042933']),
+            ('County Park',          ['Q5177940']),
+            ('Reservoir',            ['Q131681']),
+            ('Wilderness Area',      ['Q27995042']),
           ]
+          # MOUNTAIN, LAKE AND BEACH ARE NOT LIKE THE OTHERS (2026-09-17, measured).
+          # 90% of Mountain, 70% of Lake and 88% of Beach are items with exactly one
+          # sitelink -- the signature of bot-made stubs, one article per named hill and
+          # pond in a government feature database. At floor 0 those three alone are 97,260
+          # rows against 24,284 for every other class combined.
+          # Raising their sitelink floor would be selecting by fame again, and it is worse
+          # than it looks: "Olallie Lake" (Q107373479) is a DISAMBIGUATION PAGE carrying two
+          # sitelinks, English and Cebuano -- and the Cebuano Wikipedia is ~99% bot-written.
+          # A sitelink count on a geographic feature substantially measures whether one bot's
+          # source list included it.
+          # So these three get a rule that means something instead: the item must carry an
+          # image or an official website. A human bothered. Olallie Scenic Area (Q3350146)
+          # carries an image; a nameless pond does not.
+          EXTRA = { 'Mountain': '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }',
+                    'Lake':     '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }',
+                    'Beach':    '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }' }
           # THE FLOOR IS MEASURED, NOT GUESSED (2026-09-17).
           # It used to be MIN_SL = {Mountain: 6, Lake: 4, Theater: 4, Stadium: 4, Museum: 3},
           # base 2 -- numbers picked by hand back when sitelinks were the only quality signal
@@ -166,14 +215,21 @@ jobs:
             'Spanish mission in the Americas', 'fort', 'observation deck', 'planetarium',
             'science museum', 'arboretum', 'scenic byway', 'pedestrian street',
             'state historic site', 'county park', 'reservoir', 'wilderness area',
+            # still owed after the 2026-09-17 sizing run: "Spanish mission in the Americas"
+            # returned nothing, and Olallie Scenic Area showed us two classes we never asked
+            # for at all. Every one of these is a known hole, not a hunch.
+            'Spanish mission', 'mission complex', 'scenic area', 'protected area',
+            'national scenic area', 'state forest', 'state natural area', 'state recreation area',
           ]
-          def count_by_floor(path, qid):
+          def count_by_floor(path, qid, extra=''):
             """How many US items with coordinates does this class have at each floor?
                ONE aggregate query per class -- no rows come back, so it is cheap and it
                cannot truncate. Returns {floor: count} or None if the endpoint refused."""
             sums = ' '.join(f'(SUM(IF(?sl >= {f}, 1, 0)) AS ?f{f})' for f in FLOOR_STEPS)
+            ex = f'  {extra} .' if extra else ''
             q = f'''SELECT {sums} WHERE {{
               ?item {path} wd:{qid} ; wdt:P17 wd:Q30 ; wdt:P625 ?coord ; wikibase:sitelinks ?sl .
+            {ex}
             }}'''
             r = sparql(q)
             if not r: return None
@@ -186,26 +242,151 @@ jobs:
               if counts.get(f, 10**9) <= CLASS_CAP: return f
             return FLOOR_STEPS[-1]
 
+          # THE RECALL LIST. A class-enumerated pull LEAKS, because Wikidata's typing is
+          # inconsistent: the Alamo, the San Antonio River Walk, Natural Bridge Caverns,
+          # Gruene and Olallie Scenic Area are all absent, each for its own class reason.
+          # Adding a class every time a human notices a gap is not a method -- it depends on
+          # somebody spotting the hole. So the run scores itself: these are places a welcome
+          # book should be able to suggest, and every run prints the ones it did not find,
+          # WITH what Wikidata says they are, so a miss arrives as a to-do rather than a mood.
+          # It is a test set. It is allowed to be opinionated, and Brandon edits it freely.
+          RECALL = [
+            'The Alamo', 'San Antonio River Walk',
+            'Natural Bridge Caverns', 'Gruene Historic District',
+            'Schlitterbahn', 'Olallie Scenic Area',
+            'Lyndon B. Johnson National Historical Park', 'Bracken Cave',
+            'Grand Canyon National Park', 'Yellowstone National Park',
+            'Zion National Park', 'Acadia National Park',
+            'Crater Lake National Park', 'Great Smoky Mountains National Park',
+            'Rocky Mountain National Park', 'Everglades National Park',
+            'Joshua Tree National Park', 'Carlsbad Caverns National Park',
+            'Mount Rushmore National Memorial', 'Statue of Liberty',
+            'Independence Hall', 'Gettysburg National Military Park',
+            'Fort Sumter National Historical Park', 'Monticello',
+            'Mount Vernon', 'Graceland',
+            'Biltmore Estate', 'Hearst Castle',
+            'Taliesin West', 'Fallingwater',
+            'Mission San Xavier del Bac', 'San Antonio Missions National Historical Park',
+            'Cahokia Mounds', 'Mesa Verde National Park',
+            'Taos Pueblo', 'Mammoth Cave National Park',
+            'Luray Caverns', 'Meramec Caverns',
+            'Ruby Falls', 'Howe Caverns',
+            'Niagara Falls State Park', 'Multnomah Falls',
+            'Havasu Falls', 'Cannon Beach',
+            'Cape Hatteras National Seashore', 'Lake Tahoe',
+            'Crystal River', 'Hanauma Bay',
+            'Pikes Peak', 'Smith Rock State Park',
+            'Enchanted Rock State Natural Area', 'Devils Tower National Monument',
+            'Garden of the Gods', 'Stone Mountain Park',
+            'Chimney Rock State Park', 'Metropolitan Museum of Art',
+            'Art Institute of Chicago', 'Country Music Hall of Fame and Museum',
+            'The Getty Center', 'Kennedy Space Center Visitor Complex',
+            'Space Center Houston', 'National Air and Space Museum',
+            'Isabella Stewart Gardner Museum', 'Crystal Bridges Museum of American Art',
+            'Adler Planetarium', 'Exploratorium',
+            'Corning Museum of Glass', 'San Diego Zoo',
+            'Monterey Bay Aquarium', 'Georgia Aquarium',
+            'Longwood Gardens', 'Dallas Arboretum and Botanical Garden',
+            'Fort Worth Botanic Garden', 'Cedar Point',
+            'Dollywood', 'Silver Dollar City',
+            'Disneyland', 'Universal Orlando Resort',
+            'Kalahari Resorts Wisconsin Dells', "Noah's Ark Water Park",
+            'Blue Ridge Parkway', 'Going-to-the-Sun Road',
+            'Route 66', 'Pearl Street Mall',
+            'Church Street Marketplace', 'French Quarter',
+            'Charleston Historic District', 'Old Town Albuquerque',
+            'The High Line', 'Millennium Park',
+            'Biltmore Winery', "Jack Daniel's Distillery",
+            'Buffalo Trace Distillery', "Maker's Mark Distillery",
+            'Sierra Nevada Brewing Co.', 'Napa Valley Wine Train',
+            "Jacob's Well Natural Area", 'Hamilton Pool Preserve',
+            'Blanco State Park', 'Wimberley Blue Hole Regional Park',
+            'Palo Duro Canyon State Park', 'Caddo Lake State Park',
+            'Turner Falls Park', 'Beavers Bend State Park',
+            'Silver Falls State Park', 'Painted Hills',
+            'Lava River Cave', 'Sunriver Nature Center',
+            'High Desert Museum', 'Tumalo Falls',
+          ]
+
+          def recall_report(found_names):
+            norm = lambda x: re.sub(r'[^a-z0-9]+', ' ', x.lower()).strip()
+            have = {norm(n) for n in found_names}
+            hits, misses = [], []
+            for want in RECALL:
+              w = norm(want)
+              # A substring match on a SHORT name is a false positive waiting to happen --
+              # "Monticello" would claim a hit on "Monticello Dam" and hide a real miss. So a
+              # substring only counts when the shorter of the two is long enough to be
+              # distinctive; anything shorter has to match exactly.
+              def near(h):
+                if w == h: return True
+                short = min(len(w), len(h))
+                return short >= 12 and (w in h or h in w)
+              (hits if any(near(h) for h in have) else misses).append(want)
+            print(f'\n== RECALL: {len(hits)}/{len(RECALL)} of the places a book should be able to'
+                  f' suggest are in this pull ({len(hits)*100//max(len(RECALL),1)}%)')
+            if not misses:
+              print('   nothing missing.'); return
+            # Cap the interrogation. Each miss costs two polite queries and a pause; a run
+            # that went badly wrong would otherwise spend ten minutes explaining itself to us
+            # one row at a time. Forty is plenty to see the pattern.
+            LOOKUP = 40
+            print(f'\n   {len(misses)} MISSING -- and what Wikidata says each one is:')
+            if len(misses) > LOOKUP:
+              print(f'   (looking up the first {LOOKUP}; the rest are listed by name at the end)')
+            for m in misses[:LOOKUP]:
+              hit = candidates(m)
+              if not hit:
+                print(f'   {m:46s} (Wikidata has no obvious item -- check the name)')
+              else:
+                h = hit[0]
+                cls = sparql(f'SELECT ?cLabel WHERE {{ wd:{h["id"]} wdt:P31 ?c . '
+                             f'SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }} }}')
+                kinds = ', '.join(sorted({b['cLabel']['value'] for b in (cls or [])})) or '(no instance-of)'
+                print(f'   {m:46s} {h["id"]:11s} instance of: {kinds}')
+              time.sleep(1.2)
+            if len(misses) > LOOKUP:
+              print(f'\n   also missing, not looked up: {", ".join(misses[LOOKUP:])}')
+            print('\n   Each line above is either a class to add to KINDS, or a place that is'
+                  '\n   genuinely not in Wikidata and needs another source.')
+
           if os.environ.get('SIZING') == 'true':
             print('== sizing run -- counting only. Nothing is pulled and nothing is published.\n')
             print(f'   cap per class: {CLASS_CAP:,}\n')
             hdr = 'class'.ljust(26) + ''.join(f'>={f}'.rjust(9) for f in FLOOR_STEPS) + '   floor'
             print(hdr); print('-' * len(hdr))
-            tot_now, tot_new = 0, 0
+            tot_now, tot_new, capped = 0, 0, []
             for kind, classes in KINDS:
               for cls in classes:
                 walk = cls.endswith('*'); qid = cls.rstrip('*')
                 path = 'wdt:P31/wdt:P279*' if walk else 'wdt:P31'
-                c = count_by_floor(path, qid)
+                c = count_by_floor(path, qid, EXTRA.get(kind, ''))
                 if c is None:
                   print(f'{(kind + " " + cls)[:26].ljust(26)}  (the endpoint did not answer)')
                   time.sleep(2); continue
                 f = pick_floor(c)
-                print(f'{(kind + " " + cls)[:26].ljust(26)}' + ''.join(f'{c.get(x,0):,}'.rjust(9) for x in FLOOR_STEPS) + f'   >={f}')
+                mark = '  <<< CAP BINDS' if f > 0 else ''
+                if kind in EXTRA: mark += '  (image-or-website rule applied)'
+                print(f'{(kind + " " + cls)[:26].ljust(26)}' + ''.join(f'{c.get(x,0):,}'.rjust(9) for x in FLOOR_STEPS) + f'   >={f}{mark}')
+                if f > 0: capped.append((kind, cls, c.get(0, 0), c.get(f, 0), f))
                 tot_now += c.get(2, 0); tot_new += c.get(f, 0)
                 time.sleep(2)
             print(f'\n== at the OLD base floor of 2 these classes hold {tot_now:,} rows.')
             print(f'== at the measured floors they hold {tot_new:,}. That number sizes the judging run.')
+            # A CAP THAT TRUNCATES SILENTLY IS A FILTER PRETENDING TO BE PLUMBING. When it
+            # binds, raising the sitelink floor is selecting by fame -- the exact thing this
+            # rebuild removed. So say so, loudly, and let a human decide what that class holds.
+            if capped:
+              print('\n!! THE CAP BOUND ON THESE CLASSES. Raising a sitelink floor to fit a cap IS')
+              print('!! selecting by fame. Do not accept these silently -- decide what the class holds:')
+              for k, cl, all_n, kept, f in capped:
+                print(f'   {k:24s} {all_n:9,} in all -> kept {kept:,} at floor >={f}'
+                      f'  (DROPPED {all_n-kept:,})')
+            else:
+              print('\n== the cap bound on nothing. Every class is taken whole at floor 0.')
+            print('\n-- recall against the current KINDS list (names only; a real pull scores properly) --')
+            print('   skipped in sizing mode: the counting queries return no names. Run the real')
+            print('   pull to score recall.')
             print('\n-- and the classes we are still missing --')
             for term in WANTED[10:]:
               print(f'  {term}')
@@ -234,18 +415,21 @@ jobs:
               # Count first, then choose the floor from the count. A small class gets 0 and we
               # take everything it has. If the counting query will not answer, fall back to 2 --
               # the old base -- and say so, rather than guessing something new.
-              counts = count_by_floor(path, qid)
+              extra = EXTRA.get(kind, '')
+              counts = count_by_floor(path, qid, extra)
               if counts is None:
                 minsl = 2; print(f'      {kind} {qid}: no count, using the old floor of 2', flush=True)
               else:
                 minsl = pick_floor(counts)
-                print(f'      {kind} {qid}: {counts.get(0,0):,} in all, floor >={minsl} takes {counts.get(minsl,0):,}', flush=True)
+                note = '  <<< CAP BINDS, fame is deciding here' if minsl > 0 else ''
+                print(f'      {kind} {qid}: {counts.get(0,0):,} in all, floor >={minsl} takes {counts.get(minsl,0):,}{note}', flush=True)
               # PAGED, AND ORDERED. The old query was a bare LIMIT 20000 with no ORDER BY: if a
               # class ever exceeded it we got an arbitrary 20,000 rows and no error at all.
               rows, off = [], 0
               while True:
                 q = f'''SELECT ?item ?itemLabel ?coord ?sl ?adminLabel WHERE {{
                   ?item {path} wd:{qid} ; wdt:P17 wd:Q30 ; wdt:P625 ?coord ; wikibase:sitelinks ?sl .
+                  {(extra + ' .') if extra else ''}
                   FILTER(?sl >= {minsl})
                   OPTIONAL {{ ?item wdt:P131 ?admin . }}
                   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
@@ -306,6 +490,7 @@ jobs:
               time.sleep(1)
           else:
             print('\n== every class returned at least one row')
+          recall_report([r['name'] for r in rows])
           print('\n== a sample of 30, evenly spread through the file (NOT a ranking):')
           step = max(1, len(rows) // 30)
           for r in rows[::step][:30]: print(f'   {r["sitelinks"]:4d} sl  {r["name"]}  ({r["kind"]}, {r["locality"]})')
