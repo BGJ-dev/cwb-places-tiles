@@ -184,6 +184,12 @@ jobs:
           CAT = {
             'National Park':'outdoors','State Park':'outdoors','National Monument':'outdoors',
             'National Forest':'outdoors','Nature Preserve':'outdoors','Waterfall':'outdoors',
+            # the NPS designations added to the puller on 2026-09-17
+            'National Recreation Area':'outdoors','National Seashore':'outdoors',
+            'National Preserve':'outdoors','National Scenic Trail':'outdoors',
+            'Wildlife Refuge':'outdoors',
+            'National Historical Park':'culture','National Historic Site':'culture',
+            'National Memorial':'culture','National Battlefield':'culture',
             'Beach':'outdoors','Lake':'outdoors','Hot Spring':'outdoors','Canyon':'outdoors',
             'Mountain':'outdoors','Scenic Lookout':'outdoors','Botanical Garden':'outdoors',
             'Cave':'attraction','Zoo':'attraction','Aquarium':'attraction','Amusement Park':'attraction',
