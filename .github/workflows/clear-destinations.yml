@@ -6,9 +6,14 @@
 # doing it correctly for weeks, and duplicating its queries would only mean maintaining
 # two sets of QIDs. This reads that job's output and does the part it does not do:
 #
-#   1. a REAL draw number      twelve months of Wikipedia pageviews per place
-#   2. the clearing gate       cleared_at set, or the place can never be suggested
-#   3. the database            destinations.db, the D1 schema, with every source recorded
+#   1. attributes             twelve months of Wikipedia pageviews, and seasonality from them
+#   2. the database            destinations.db, the D1 schema, with every source recorded
+#
+# IT NO LONGER CLEARS ANYTHING (2026-09-17). Every row lands with cleared_at NULL. Clearance
+# is the judge's output -- verdict, confidence, pull and the guest sentence -- applied to this
+# table afterwards. This step used to clear on a pageview count, which was the old method:
+# a number deciding what a guest sees. Pageviews are an attribute now, not a gate. The name
+# of the file stays so nothing in GitHub has to be re-added.
 #
 # Publishes to its own release tag ("destinations"). It cannot touch "tiles".
 # Run "Destinations update" first if us-destinations.csv is stale.
@@ -18,15 +23,11 @@ on:
   workflow_dispatch:
     inputs:
       pageviews:
-        description: 'Fetch Wikipedia pageviews — the real draw number. Adds ~15 min. Off = clear on sitelinks alone.'
+        description: 'Fetch Wikipedia pageviews and seasonality. Adds ~15 min. Off = the columns stay empty.'
         type: boolean
         default: true
-      min_views:
-        description: 'Annual pageviews needed to clear (default 12000 = about 1,000 a month)'
-        type: string
-        default: '12000'
       pageview_budget_min:
-        description: 'Minutes to spend fetching pageviews before stopping (the rest stay uncleared)'
+        description: 'Minutes to spend fetching pageviews before stopping (the rest keep empty columns)'
         type: string
         default: '45'
       dry_run:
@@ -106,11 +107,12 @@ jobs:
                   print(f'   titles at {i}: {type(e).__name__}', flush=True)
           print(f'{len(titles):,} of {len(rows):,} have an English Wikipedia article\n', flush=True)
 
-          # ---- 2. views, politely, most-promising first ----
-          # Descending sitelinks, so if we run out of time we have spent it on the places
-          # most likely to clear. Everything unfetched simply stays uncleared, which is safe.
-          sl = {r['qid']: int(r['sitelinks']) for r in rows}
-          order = sorted(titles.items(), key=lambda kv: -sl.get(kv[0], 0))
+          # ---- 2. views, politely ----
+          # In file order. This used to run descending by sitelinks so that a time budget was
+          # spent on "the places most likely to clear" -- but nothing clears here any more, and
+          # ordering the work by fame meant a short run came back with a view count for the
+          # famous rows and nothing for the rest, which is exactly the bias we are removing.
+          order = sorted(titles.items())
           budget = float(os.environ.get('BUDGET_MIN') or 45) * 60
           t0 = time.time()
           codes = collections.Counter()
@@ -171,14 +173,12 @@ jobs:
 
       - name: Clear, categorise, and build the database
         env:
-          MIN_VIEWS: ${{ inputs.min_views }}
         run: |
           python3 - <<'PY'
           import csv, sqlite3, os, json, collections
 
-          MIN_VIEWS = int(os.environ.get('MIN_VIEWS') or 12000)
           rows = list(csv.DictReader(open('us-destinations.csv', encoding='utf-8')))
-          print(f'{len(rows):,} candidates · clearing bar: {MIN_VIEWS:,} views/yr\n')
+          print(f'{len(rows):,} candidates · nothing is cleared here; the judge does that\n')
 
           # "Destinations update" kind -> our guest-facing category.
           CAT = {
@@ -216,58 +216,55 @@ jobs:
                   why['bad coordinates'] += 1; continue
               views = int(r.get('views_12mo') or 0)
               sl = int(r['sitelinks'])
-              # CONFIDENCE: independent things that vouch for this place.
-              conf = 1 + (1 if r.get('enwiki') else 0) + (1 if r.get('locality') else 0)
+              # VOUCH: independent things that corroborate this place exists and is placed.
+              # It was called "confidence", which collides with the judge's own CONFIDENCE
+              # (HIGH/LOW: can the thing that decided this verdict change?). Two different
+              # meanings in one column name is how a judged value gets silently overwritten
+              # by an integer on the next run.
+              vouch = 1 + (1 if r.get('enwiki') else 0) + (1 if r.get('locality') else 0)
               # DRAW is a measured number or it is nothing. We never manufacture one from
               # sitelinks and put it in the same column as real counts.
               draw  = views or None
               basis = 'wikipedia_pageviews_12mo' if views else None
-              # NO MEASURED DRAW, NO CLEARANCE. Sitelinks are the thing we established do
-              # not measure tourist draw: Mount Saint Elias and Novarupta both clear on
-              # sitelinks and nobody day-trips to an Alaskan volcano, while Mount Rushmore
-              # sits in the same class. Pageviews separate them; sitelinks cannot. A place
-              # with no view count stays in the table as a candidate and is never suggested.
-              cleared = (conf >= 2) and views >= MIN_VIEWS
-              if not cleared:
-                  why['no measured draw' if not views else 'below the bar'] += 1
+              # NOTHING CLEARS HERE. Every row is a candidate; the judge decides. Pageviews
+              # do not measure tourist draw either -- Mount Saint Elias and Novarupta score
+              # like Mount Rushmore and nobody day-trips to an Alaskan volcano -- so they are
+              # recorded as an attribute and read by nothing that picks what a guest sees.
               seas = r.get('seasonality')
               out.append({
                 'id': 'wd:' + r['qid'], 'name': r['name'], 'lat': lat, 'lon': lon,
                 'locality': r.get('locality',''), 'region': r.get('region',''),
                 'cat': cat, 'kind': kind, 'wave': 1,
-                'cleared_at': ('2026-09-17' if cleared else None),
-                'cleared_by': ('rule:wave1-v1' if cleared else None),
-                'draw': draw, 'draw_basis': basis, 'confidence': conf,
+                'cleared_at': None, 'cleared_by': None,
+                'verdict': None, 'confidence': None, 'pull': None, 'description': None,
+                'draw': draw, 'draw_basis': basis, 'vouch': vouch,
                 'sitelinks': sl, 'seasonality': (float(seas) if seas else None),
                 'official_url': '', 'wikidata_qid': r['qid'], 'enwiki': r.get('enwiki',''),
                 'fsq_id': None,
               })
 
-          cleared = [o for o in out if o['cleared_at']]
-          measured = [o for o in cleared if o['draw']]
           withviews = sum(1 for o in out if o['draw'])
-          if withviews < len(out) * 0.4:
-              print(f'\n!! only {withviews:,} of {len(out):,} rows have a view count. The pageviews step')
-              print('   did not do its job, and clearing on this would publish a hollow layer.')
-              raise SystemExit('refusing to build a cleared layer without draw numbers')
-          print(f'{len(out):,} candidates · {len(cleared):,} CLEARED ({len(measured):,} on a measured view count)')
+          # THE GUARD THAT MATTERS NOW. The old one refused to publish unless 40% of rows had a
+          # view count -- it was protecting a clearing gate that no longer exists, and under the
+          # new method it would block a perfectly good candidate table. What can actually go
+          # wrong here is the upstream pull collapsing, so that is what is checked.
+          prev = 0
+          if os.path.exists('prev-manifest.json'):
+              try: prev = int(json.load(open('prev-manifest.json')).get('candidates') or 0)
+              except Exception: prev = 0
+          if prev and len(out) < prev * 0.7:
+              print(f'\n!! {len(out):,} candidates against {prev:,} last time -- the upstream pull collapsed.')
+              raise SystemExit('refusing to publish a candidate table that lost a third of its rows')
+          print(f'{len(out):,} candidates staged, none cleared · {withviews:,} carry a measured view count')
           print('  set aside:', dict(why))
-          print('\ncleared by category:', dict(collections.Counter(o['cat'] for o in cleared)))
-          print('cleared by kind:    ', dict(collections.Counter(o['kind'] for o in cleared)))
+          print('\ncandidates by category:', dict(collections.Counter(o['cat'] for o in out)))
+          print('candidates by kind:    ', dict(collections.Counter(o['kind'] for o in out)))
+          print('\n== NEXT: judge these. Nothing here is offerable until cleared_at is set.')
 
-          if measured:
-              print('\n-- top 20 by measured draw --')
-              for o in sorted(measured, key=lambda x: -x['draw'])[:20]:
-                  print(f"   {o['draw']:10,d}  {o['cat']:10s} {o['name'][:44]:46s} {o['locality'][:24]}")
-              print('\n-- 25 AT THE BAR. This is the list to eyeball: is the bar right? --')
-              for o in sorted(measured, key=lambda x: x['draw'])[:25]:
-                  print(f"   {o['draw']:10,d}  {o['cat']:10s} {o['name'][:44]:46s} {o['locality'][:24]}")
-              print('\n-- 20 JUST BELOW the bar. What are we turning away? --')
-              near = sorted([o for o in out if not o['cleared_at'] and o['draw']], key=lambda x: -x['draw'])[:20]
-              for o in near:
-                  print(f"   {o['draw']:10,d}  {o['cat']:10s} {o['name'][:44]:46s} {o['locality'][:24]}")
-              print('\n-- most seasonal cleared places (peak month over median; print needs to know) --')
-              for o in sorted([m for m in measured if m['seasonality']], key=lambda x: -x['seasonality'])[:12]:
+          seasonal = [o for o in out if o['seasonality']]
+          if seasonal:
+              print('\n-- most seasonal candidates (peak month over median; print needs to know) --')
+              for o in sorted(seasonal, key=lambda x: -x['seasonality'])[:12]:
                   print(f"   x{o['seasonality']:<5.1f} {o['cat']:10s} {o['name'][:44]:46s} {o['locality'][:24]}")
 
           if os.path.exists('destinations.db'): os.remove('destinations.db')
@@ -277,7 +274,10 @@ jobs:
               id TEXT PRIMARY KEY, name TEXT NOT NULL, lat REAL, lon REAL,
               locality TEXT, region TEXT, cat TEXT, kind TEXT, wave INTEGER,
               cleared_at TEXT, cleared_by TEXT,
-              draw INTEGER, draw_basis TEXT, confidence INTEGER, sitelinks INTEGER, seasonality REAL,
+              -- the judge's four fields. Empty until it has read the row.
+              verdict TEXT, confidence TEXT, pull INTEGER, description TEXT,
+              -- attributes. None of these decides what a guest is shown.
+              draw INTEGER, draw_basis TEXT, vouch INTEGER, sitelinks INTEGER, seasonality REAL,
               official_url TEXT, wikidata_qid TEXT, enwiki TEXT, fsq_id TEXT);
             CREATE INDEX places_cleared ON places(cleared_at) WHERE cleared_at IS NOT NULL;
             CREATE INDEX places_geo ON places(lat, lon);
@@ -302,9 +302,9 @@ jobs:
           with open('destinations.csv', 'w', newline='', encoding='utf-8') as f:
               w = csv.DictWriter(f, fieldnames=cols); w.writeheader(); w.writerows(out)
           json.dump({'built': '2026-09-17', 'wave': 1,
-                     'candidates': len(out), 'cleared': len(cleared), 'cleared_on_measured_draw': len(measured),
-                     'bar': f'confidence>=2 AND (views>={MIN_VIEWS} OR sitelinks>=12)',
-                     'by_cat': dict(collections.Counter(o['cat'] for o in cleared)),
+                     'candidates': len(out), 'cleared': 0, 'with_view_count': withviews,
+                     'bar': 'none - this step clears nothing; cleared_at is set by the judge',
+                     'by_cat': dict(collections.Counter(o['cat'] for o in out)),
                      'upstream': 'us-destinations.csv from the Destinations update job',
                      'sources': ['wikidata (CC0)', 'wikipedia pageviews']},
                     open('destinations-manifest.json', 'w'), indent=1)
