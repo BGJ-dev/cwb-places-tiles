@@ -25,6 +25,10 @@ on:
         description: 'Annual pageviews needed to clear (default 12000 = about 1,000 a month)'
         type: string
         default: '12000'
+      pageview_budget_min:
+        description: 'Minutes to spend fetching pageviews before stopping (the rest stay uncleared)'
+        type: string
+        default: '45'
       dry_run:
         description: 'Report only. Publishes nothing.'
         type: boolean
@@ -36,7 +40,7 @@ permissions:
 jobs:
   clear:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -53,15 +57,41 @@ jobs:
 
       - name: Twelve months of Wikipedia pageviews
         if: ${{ inputs.pageviews }}
+        env:
+          BUDGET_MIN: ${{ inputs.pageview_budget_min }}
         run: |
           python3 - <<'PY'
-          import requests, csv, datetime, concurrent.futures as cf
+          import requests, csv, datetime, time, os, collections, threading
+          import concurrent.futures as cf
 
-          UA = 'CustomWelcomeBook/1.0 (https://customwelcomebook.com; places research)'
+          # Run #1 of this job got 33 answers out of 8,050 and could not say why, because the
+          # fetch swallowed the status code. Twelve threads against an unauthenticated
+          # Wikimedia endpoint is a burst, and a burst gets throttled. So: probe first and
+          # print exactly what comes back, then go slowly, respect Retry-After, and tally
+          # the failures by status so a bad run explains itself.
+          UA = ('CustomWelcomeBook/1.0 (+https://github.com/BGJ-dev/cwb-places-tiles) '
+                'python-requests')
+          PV = ('https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/'
+                'en.wikipedia/all-access/user/{t}/monthly/{a}/{b}')
+          end   = datetime.date.today().replace(day=1)
+          start = (end - datetime.timedelta(days=365)).replace(day=1)
+          A, B = start.strftime('%Y%m%d00'), end.strftime('%Y%m%d00')
+
           rows = list(csv.DictReader(open('us-destinations.csv', encoding='utf-8')))
           print(f'{len(rows):,} destinations\n', flush=True)
 
-          # qid -> English Wikipedia title, 50 at a time
+          # ---- 0. probe: one known article, everything printed ----
+          pr = requests.get(PV.format(t='Grand_Canyon', a=A, b=B),
+                            headers={'User-Agent': UA}, timeout=45)
+          print(f'== probe Grand_Canyon -> HTTP {pr.status_code}')
+          for h in ('retry-after', 'x-ratelimit-remaining', 'content-type'):
+              if h in pr.headers: print(f'   {h}: {pr.headers[h]}')
+          print(f'   body: {pr.text[:220]}\n', flush=True)
+          if pr.status_code != 200:
+              raise SystemExit('the pageviews endpoint is not answering a known-good article — '
+                               'nothing below will work; read the status above')
+
+          # ---- 1. qid -> English Wikipedia title ----
           S = requests.Session(); S.headers['User-Agent'] = UA
           titles, ids = {}, [r['qid'] for r in rows]
           for i in range(0, len(ids), 50):
@@ -74,35 +104,61 @@ jobs:
                       if t: titles[q] = t
               except Exception as e:
                   print(f'   titles at {i}: {type(e).__name__}', flush=True)
-              if i and i % 2000 == 0: print(f'   titles {i:,}/{len(ids):,} · {len(titles):,} found', flush=True)
           print(f'{len(titles):,} of {len(rows):,} have an English Wikipedia article\n', flush=True)
 
-          end = datetime.date.today().replace(day=1)
-          start = (end - datetime.timedelta(days=365)).replace(day=1)
-          PV = ('https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/'
-                'en.wikipedia/all-access/user/{t}/monthly/{a}/{b}')
+          # ---- 2. views, politely, most-promising first ----
+          # Descending sitelinks, so if we run out of time we have spent it on the places
+          # most likely to clear. Everything unfetched simply stays uncleared, which is safe.
+          sl = {r['qid']: int(r['sitelinks']) for r in rows}
+          order = sorted(titles.items(), key=lambda kv: -sl.get(kv[0], 0))
+          budget = float(os.environ.get('BUDGET_MIN') or 45) * 60
+          t0 = time.time()
+          codes = collections.Counter()
+          got, lock, stop = {}, threading.Lock(), threading.Event()
 
-          def views(item):
+          def one(item):
               q, t = item
-              try:
-                  s = requests.Session(); s.headers['User-Agent'] = UA
-                  r = s.get(PV.format(t=requests.utils.quote(t.replace(' ', '_'), safe=''),
-                                      a=start.strftime('%Y%m%d00'), b=end.strftime('%Y%m%d00')), timeout=45)
-                  if r.status_code != 200: return q, None, None
-                  m = [i['views'] for i in r.json().get('items', [])]
-                  if not m: return q, None, None
-                  sm = sorted(m); med = sm[len(sm) // 2]
-                  # peak over median: 1.0 is flat all year, 3+ is a summer-only place
-                  return q, sum(m), (round(max(m) / med, 1) if med else None)
-              except Exception:
-                  return q, None, None
+              if stop.is_set(): return
+              for attempt in range(3):
+                  if time.time() - t0 > budget:
+                      stop.set(); return
+                  try:
+                      r = requests.get(
+                          PV.format(t=requests.utils.quote(t.replace(' ', '_'), safe=''), a=A, b=B),
+                          headers={'User-Agent': UA}, timeout=45)
+                  except Exception as e:
+                      with lock: codes[type(e).__name__] += 1
+                      time.sleep(2 + attempt * 3); continue
+                  if r.status_code == 200:
+                      m = [i['views'] for i in r.json().get('items', [])]
+                      if not m:
+                          with lock: codes['200-empty'] += 1
+                          return
+                      sm = sorted(m); med = sm[len(sm) // 2]
+                      with lock:
+                          codes[200] += 1
+                          got[q] = (sum(m), round(max(m) / med, 1) if med else None)
+                      return
+                  if r.status_code in (429, 503):
+                      wait = float(r.headers.get('retry-after') or (5 * (attempt + 1)))
+                      with lock: codes[r.status_code] += 1
+                      time.sleep(min(wait, 60)); continue
+                  with lock: codes[r.status_code] += 1
+                  return                                   # 404 and friends: the article has no data
 
-          got = {}
-          with cf.ThreadPoolExecutor(max_workers=12) as ex:
-              for n, (q, total, seas) in enumerate(ex.map(views, titles.items()), 1):
-                  if total is not None: got[q] = (total, seas)
-                  if n % 2000 == 0: print(f'   pageviews {n:,}/{len(titles):,} · {len(got):,} answered', flush=True)
-          print(f'{len(got):,} have a twelve-month view count', flush=True)
+          # four threads, not twelve. ~8,000 articles at roughly 8/s is about twenty minutes.
+          with cf.ThreadPoolExecutor(max_workers=4) as ex:
+              futs = [ex.submit(one, it) for it in order]
+              for n, _ in enumerate(cf.as_completed(futs), 1):
+                  if n % 500 == 0:
+                      el = time.time() - t0
+                      print(f'   {n:,}/{len(order):,} · {len(got):,} answered · {el/60:.1f} min · '
+                            f'{dict(codes.most_common(4))}', flush=True)
+          print(f'\n== {len(got):,} of {len(order):,} have a twelve-month view count'
+                f' in {(time.time()-t0)/60:.1f} min')
+          print(f'== responses by status: {dict(codes.most_common())}')
+          if stop.is_set():
+              print('== the time budget ran out; the rest stay uncleared, which is the safe side')
 
           for r in rows:
               t = got.get(r['qid'])
