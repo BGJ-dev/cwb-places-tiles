@@ -1,0 +1,261 @@
+# .github/workflows/clear-destinations.yml
+#
+# WAVE 1, STAGE 2 — turn the destinations list into the CLEARED layer.
+#
+# This does NOT talk to Wikidata. "Destinations update" already does that, it has been
+# doing it correctly for weeks, and duplicating its queries would only mean maintaining
+# two sets of QIDs. This reads that job's output and does the part it does not do:
+#
+#   1. a REAL draw number      twelve months of Wikipedia pageviews per place
+#   2. the clearing gate       cleared_at set, or the place can never be suggested
+#   3. the database            destinations.db, the D1 schema, with every source recorded
+#
+# Publishes to its own release tag ("destinations"). It cannot touch "tiles".
+# Run "Destinations update" first if us-destinations.csv is stale.
+name: Destinations clear (wave 1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pageviews:
+        description: 'Fetch Wikipedia pageviews — the real draw number. Adds ~15 min. Off = clear on sitelinks alone.'
+        type: boolean
+        default: true
+      min_views:
+        description: 'Annual pageviews needed to clear (default 12000 = about 1,000 a month)'
+        type: string
+        default: '12000'
+      dry_run:
+        description: 'Report only. Publishes nothing.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  clear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install requests
+
+      - name: Take the destinations list from the tiles release
+        run: |
+          set -e
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/us-destinations.csv" -o us-destinations.csv
+          wc -l us-destinations.csv
+          head -2 us-destinations.csv
+
+      - name: Twelve months of Wikipedia pageviews
+        if: ${{ inputs.pageviews }}
+        run: |
+          python3 - <<'PY'
+          import requests, csv, datetime, concurrent.futures as cf
+
+          UA = 'CustomWelcomeBook/1.0 (https://customwelcomebook.com; places research)'
+          rows = list(csv.DictReader(open('us-destinations.csv', encoding='utf-8')))
+          print(f'{len(rows):,} destinations\n', flush=True)
+
+          # qid -> English Wikipedia title, 50 at a time
+          S = requests.Session(); S.headers['User-Agent'] = UA
+          titles, ids = {}, [r['qid'] for r in rows]
+          for i in range(0, len(ids), 50):
+              try:
+                  r = S.get('https://www.wikidata.org/w/api.php', timeout=60, params={
+                      'action': 'wbgetentities', 'ids': '|'.join(ids[i:i+50]),
+                      'props': 'sitelinks', 'sitefilter': 'enwiki', 'format': 'json'})
+                  for q, e in (r.json().get('entities') or {}).items():
+                      t = (e.get('sitelinks') or {}).get('enwiki', {}).get('title')
+                      if t: titles[q] = t
+              except Exception as e:
+                  print(f'   titles at {i}: {type(e).__name__}', flush=True)
+              if i and i % 2000 == 0: print(f'   titles {i:,}/{len(ids):,} · {len(titles):,} found', flush=True)
+          print(f'{len(titles):,} of {len(rows):,} have an English Wikipedia article\n', flush=True)
+
+          end = datetime.date.today().replace(day=1)
+          start = (end - datetime.timedelta(days=365)).replace(day=1)
+          PV = ('https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/'
+                'en.wikipedia/all-access/user/{t}/monthly/{a}/{b}')
+
+          def views(item):
+              q, t = item
+              try:
+                  s = requests.Session(); s.headers['User-Agent'] = UA
+                  r = s.get(PV.format(t=requests.utils.quote(t.replace(' ', '_'), safe=''),
+                                      a=start.strftime('%Y%m%d00'), b=end.strftime('%Y%m%d00')), timeout=45)
+                  if r.status_code != 200: return q, None, None
+                  m = [i['views'] for i in r.json().get('items', [])]
+                  if not m: return q, None, None
+                  sm = sorted(m); med = sm[len(sm) // 2]
+                  # peak over median: 1.0 is flat all year, 3+ is a summer-only place
+                  return q, sum(m), (round(max(m) / med, 1) if med else None)
+              except Exception:
+                  return q, None, None
+
+          got = {}
+          with cf.ThreadPoolExecutor(max_workers=12) as ex:
+              for n, (q, total, seas) in enumerate(ex.map(views, titles.items()), 1):
+                  if total is not None: got[q] = (total, seas)
+                  if n % 2000 == 0: print(f'   pageviews {n:,}/{len(titles):,} · {len(got):,} answered', flush=True)
+          print(f'{len(got):,} have a twelve-month view count', flush=True)
+
+          for r in rows:
+              t = got.get(r['qid'])
+              r['enwiki'] = titles.get(r['qid'], '')
+              r['views_12mo'] = t[0] if t else ''
+              r['seasonality'] = t[1] if t and t[1] is not None else ''
+          with open('us-destinations.csv', 'w', newline='', encoding='utf-8') as f:
+              w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
+          PY
+
+      - name: Clear, categorise, and build the database
+        env:
+          MIN_VIEWS: ${{ inputs.min_views }}
+        run: |
+          python3 - <<'PY'
+          import csv, sqlite3, os, json, collections
+
+          MIN_VIEWS = int(os.environ.get('MIN_VIEWS') or 12000)
+          rows = list(csv.DictReader(open('us-destinations.csv', encoding='utf-8')))
+          print(f'{len(rows):,} candidates · clearing bar: {MIN_VIEWS:,} views/yr\n')
+
+          # "Destinations update" kind -> our guest-facing category.
+          CAT = {
+            'National Park':'outdoors','State Park':'outdoors','National Monument':'outdoors',
+            'National Forest':'outdoors','Nature Preserve':'outdoors','Waterfall':'outdoors',
+            'Beach':'outdoors','Lake':'outdoors','Hot Spring':'outdoors','Canyon':'outdoors',
+            'Mountain':'outdoors','Scenic Lookout':'outdoors','Botanical Garden':'outdoors',
+            'Cave':'attraction','Zoo':'attraction','Aquarium':'attraction','Amusement Park':'attraction',
+            'Tourist Attraction':'attraction',
+            'Museum':'culture','Historic Site':'culture','Monument':'culture','Lighthouse':'culture',
+            'Theater':'culture',
+            'Winery':'maker','Brewery':'maker','Distillery':'maker',
+          }
+          # Deliberately not wave 1. A stadium is an event with a date; a ski area needs the
+          # season field to be honest in print. Both are in the puller's output on purpose --
+          # they are excluded HERE so the puller stays untouched and we can change our mind.
+          NEVER = {'Stadium', 'Ski Area'}
+
+          out, why = [], collections.Counter()
+          for r in rows:
+              kind = r['kind']
+              if kind in NEVER:
+                  why[f'not wave 1: {kind}'] += 1; continue
+              cat = CAT.get(kind)
+              if not cat:
+                  why[f'no category for {kind}'] += 1; continue
+              try: lat, lon = float(r['lat']), float(r['lon'])
+              except ValueError:
+                  why['bad coordinates'] += 1; continue
+              views = int(r.get('views_12mo') or 0)
+              sl = int(r['sitelinks'])
+              # CONFIDENCE: independent things that vouch for this place.
+              conf = 1 + (1 if r.get('enwiki') else 0) + (1 if r.get('locality') else 0)
+              # DRAW is a measured number or it is nothing. We never manufacture one from
+              # sitelinks and put it in the same column as real counts.
+              draw  = views or None
+              basis = 'wikipedia_pageviews_12mo' if views else None
+              # NO MEASURED DRAW, NO CLEARANCE. Sitelinks are the thing we established do
+              # not measure tourist draw: Mount Saint Elias and Novarupta both clear on
+              # sitelinks and nobody day-trips to an Alaskan volcano, while Mount Rushmore
+              # sits in the same class. Pageviews separate them; sitelinks cannot. A place
+              # with no view count stays in the table as a candidate and is never suggested.
+              cleared = (conf >= 2) and views >= MIN_VIEWS
+              if not cleared:
+                  why['no measured draw' if not views else 'below the bar'] += 1
+              seas = r.get('seasonality')
+              out.append({
+                'id': 'wd:' + r['qid'], 'name': r['name'], 'lat': lat, 'lon': lon,
+                'locality': r.get('locality',''), 'region': r.get('region',''),
+                'cat': cat, 'kind': kind, 'wave': 1,
+                'cleared_at': ('2026-09-17' if cleared else None),
+                'cleared_by': ('rule:wave1-v1' if cleared else None),
+                'draw': draw, 'draw_basis': basis, 'confidence': conf,
+                'sitelinks': sl, 'seasonality': (float(seas) if seas else None),
+                'official_url': '', 'wikidata_qid': r['qid'], 'enwiki': r.get('enwiki',''),
+                'fsq_id': None,
+              })
+
+          cleared = [o for o in out if o['cleared_at']]
+          measured = [o for o in cleared if o['draw']]
+          withviews = sum(1 for o in out if o['draw'])
+          if withviews < len(out) * 0.4:
+              print(f'\n!! only {withviews:,} of {len(out):,} rows have a view count. The pageviews step')
+              print('   did not do its job, and clearing on this would publish a hollow layer.')
+              raise SystemExit('refusing to build a cleared layer without draw numbers')
+          print(f'{len(out):,} candidates · {len(cleared):,} CLEARED ({len(measured):,} on a measured view count)')
+          print('  set aside:', dict(why))
+          print('\ncleared by category:', dict(collections.Counter(o['cat'] for o in cleared)))
+          print('cleared by kind:    ', dict(collections.Counter(o['kind'] for o in cleared)))
+
+          if measured:
+              print('\n-- top 20 by measured draw --')
+              for o in sorted(measured, key=lambda x: -x['draw'])[:20]:
+                  print(f"   {o['draw']:10,d}  {o['cat']:10s} {o['name'][:44]:46s} {o['locality'][:24]}")
+              print('\n-- 25 AT THE BAR. This is the list to eyeball: is the bar right? --')
+              for o in sorted(measured, key=lambda x: x['draw'])[:25]:
+                  print(f"   {o['draw']:10,d}  {o['cat']:10s} {o['name'][:44]:46s} {o['locality'][:24]}")
+              print('\n-- 20 JUST BELOW the bar. What are we turning away? --')
+              near = sorted([o for o in out if not o['cleared_at'] and o['draw']], key=lambda x: -x['draw'])[:20]
+              for o in near:
+                  print(f"   {o['draw']:10,d}  {o['cat']:10s} {o['name'][:44]:46s} {o['locality'][:24]}")
+              print('\n-- most seasonal cleared places (peak month over median; print needs to know) --')
+              for o in sorted([m for m in measured if m['seasonality']], key=lambda x: -x['seasonality'])[:12]:
+                  print(f"   x{o['seasonality']:<5.1f} {o['cat']:10s} {o['name'][:44]:46s} {o['locality'][:24]}")
+
+          if os.path.exists('destinations.db'): os.remove('destinations.db')
+          db = sqlite3.connect('destinations.db')
+          db.executescript('''
+            CREATE TABLE places(
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, lat REAL, lon REAL,
+              locality TEXT, region TEXT, cat TEXT, kind TEXT, wave INTEGER,
+              cleared_at TEXT, cleared_by TEXT,
+              draw INTEGER, draw_basis TEXT, confidence INTEGER, sitelinks INTEGER, seasonality REAL,
+              official_url TEXT, wikidata_qid TEXT, enwiki TEXT, fsq_id TEXT);
+            CREATE INDEX places_cleared ON places(cleared_at) WHERE cleared_at IS NOT NULL;
+            CREATE INDEX places_geo ON places(lat, lon);
+            CREATE TABLE place_sources(
+              place_id TEXT, source TEXT, source_ref TEXT, observed_at TEXT, payload TEXT);
+            CREATE INDEX place_sources_id ON place_sources(place_id);
+          ''')
+          cols = list(out[0].keys())
+          db.executemany(f"INSERT INTO places({','.join(cols)}) VALUES({','.join('?'*len(cols))})",
+                         [tuple(o[c] for c in cols) for o in out])
+          src = []
+          for o in out:
+              src.append((o['id'], 'wikidata', o['wikidata_qid'], '2026-09-17',
+                          json.dumps({'kind': o['kind'], 'sitelinks': o['sitelinks']})))
+              if o['enwiki']:
+                  src.append((o['id'], 'wikipedia_pageviews', o['enwiki'], '2026-09-17',
+                              json.dumps({'views_12mo': o['draw'], 'seasonality': o['seasonality']})))
+          db.executemany('INSERT INTO place_sources VALUES(?,?,?,?,?)', src)
+          db.commit()
+          print(f'\ndestinations.db — {len(out):,} places · {len(src):,} source rows')
+
+          with open('destinations.csv', 'w', newline='', encoding='utf-8') as f:
+              w = csv.DictWriter(f, fieldnames=cols); w.writeheader(); w.writerows(out)
+          json.dump({'built': '2026-09-17', 'wave': 1,
+                     'candidates': len(out), 'cleared': len(cleared), 'cleared_on_measured_draw': len(measured),
+                     'bar': f'confidence>=2 AND (views>={MIN_VIEWS} OR sitelinks>=12)',
+                     'by_cat': dict(collections.Counter(o['cat'] for o in cleared)),
+                     'upstream': 'us-destinations.csv from the Destinations update job',
+                     'sources': ['wikidata (CC0)', 'wikipedia pageviews']},
+                    open('destinations-manifest.json', 'w'), indent=1)
+          PY
+
+      - name: Publish to the "destinations" release (its own tag)
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          set -e
+          gzip -f -9 -k destinations.csv
+          gh release view destinations --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create destinations --repo "$GITHUB_REPOSITORY" --title "Cleared destinations (wave 1)" \
+              --notes "The cleared layer. Nothing is suggested unless cleared_at is set."
+          gh release upload destinations destinations.db destinations.csv.gz destinations-manifest.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          ls -la destinations.db destinations.csv.gz
