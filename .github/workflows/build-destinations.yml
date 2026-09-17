@@ -44,11 +44,15 @@ jobs:
           ENDPOINT = 'https://query.wikidata.org/sparql'
           # kind label → Wikidata classes (direct instance-of); '*' after a QID also walks subclasses (P279*)
           KINDS = [
-            ('National Park',        ['Q46169']),
+            # Q46169 is the GENERIC "national park". Zion, Acadia, Crater Lake and Joshua
+            # Tree are none of them -- they are instance of Q34918903, "National Park of the
+            # United States". That is why this class returned 50 when there are 63. Found by
+            # the recall report on the first real pull, 2026-09-17.
+            ('National Park',        ['Q46169', 'Q34918903']),
             ('Nature Preserve',      ['Q179049', 'Q1310307']),
             ('Waterfall',            ['Q34038']),
             ('Beach',                ['Q40080']),
-            ('Lake',                 ['Q23397']),
+            ('Lake',                 ['Q23397*']),   # * : Flathead Lake is a "moraine-dammed lake"
             ('Cave',                 ['Q35509']),
             ('Hot Spring',           ['Q177380']),
             ('Canyon',               ['Q150784']),
@@ -57,7 +61,7 @@ jobs:
             ('Botanical Garden',     ['Q167346']),
             ('Zoo',                  ['Q43501']),
             ('Aquarium',             ['Q2281788']),
-            ('Amusement Park',       ['Q194195', 'Q3467128']),
+            ('Amusement Park',       ['Q194195', 'Q3467128', 'Q2416723']),  # Q2416723 theme park: Disneyland, Universal
             ('Museum',               ['Q33506*']),
             ('Historic Site',        ['Q1081138', 'Q839954', 'Q23413']),
             ('Monument',             ['Q4989906']),
@@ -83,7 +87,7 @@ jobs:
             ('State Park',           ['Q1761072*']),
             ('National Monument',    ['Q893775']),
             ('National Forest',      ['Q612741']),
-            ('Distillery',           ['Q1251750']),
+            ('Distillery',           ['Q1251750*']),  # * : Jack Daniel's is a "whisky distillery"
             # The NPS has about twenty designations and we were querying two, which is why
             # National Park returned 48 and LBJ National Historical Park was missing entirely.
             # These ten came out of the discovery run: every description below names the
@@ -131,11 +135,11 @@ jobs:
             ('Fort',                 ['Q1785071']),
             ('Observation Deck',     ['Q177305']),
             ('Planetarium',          ['Q148319']),
-            ('Science Museum',       ['Q588140']),
+            ('Science Museum',       ['Q588140*']),   # returned ZERO without the subclass walk
             ('Arboretum',            ['Q272231']),
             ('Scenic Route',         ['Q1406331']),
             ('Pedestrian Street',    ['Q62685721']),
-            ('State Historic Site',  ['Q28042933']),
+            ('State Historic Site',  ['Q28042933*']), # returned ZERO without the subclass walk
             ('County Park',          ['Q5177940']),
             ('Reservoir',            ['Q131681']),
             ('Wilderness Area',      ['Q27995042']),
@@ -154,6 +158,16 @@ jobs:
             ('National Scenic Area', ['Q6978245']),
             ('State Forest',         ['Q2324919']),
             ('State Recreation Area',['Q113033132']),
+            # Named by the first recall report, with the place that proved each one:
+            #   Q1564373  mission station        -- Mission San Xavier del Bac
+            #   Q20856087 NRHP district          -- the French Quarter, Biltmore Estate
+            #   Q22698*   park (subclass walk)   -- Millennium Park, The High Line,
+            #                                       Ho'okena Beach Park
+            #   Q39816    bay                    -- Hanauma Bay
+            ('Mission',              ['Q1564373']),
+            ('NRHP District',        ['Q20856087']),
+            ('Urban Park',           ['Q22698*']),
+            ('Bay',                  ['Q39816']),
           ]
           # MOUNTAIN, LAKE AND BEACH ARE NOT LIKE THE OTHERS (2026-09-17, measured).
           # 90% of Mountain, 70% of Lake and 88% of Beach are items with exactly one
@@ -227,11 +241,24 @@ jobs:
           #             101. The image rule was no use here anyway: it cut 16% arbitrarily,
           #             dropping Clarksdale and Danville while keeping three South Main Streets.
           _HUMAN_BOTHERED = '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }'
+          # BEACH IS OUT OF THE RULE, FOR GOOD, AND THE RECALL LIST IS WHY (2026-09-17).
+          # I removed it on my own reading of the names, Brandon showed my three examples were
+          # thin stubs whose destinations arrive elsewhere, and I put it back. Then the first
+          # real pull scored recall and named SIESTA KEY BEACH (Q7511756) and CORONADO BEACH
+          # (Q49320439) as missing -- both instance of Q40080, both dropped by this rule, and
+          # neither reachable under any other class we query (Siesta Key is a barrier island,
+          # Coronado is a city; we pull neither). That is the question I said would settle it:
+          # not "does the name sound real" but "is the destination reachable some other way."
+          # It is not. 2,486 rows is a cheap price. The judge can read them.
           EXTRA = { 'Mountain': _HUMAN_BOTHERED, 'Lake': _HUMAN_BOTHERED,
-                    'Beach': _HUMAN_BOTHERED, 'Reservoir': _HUMAN_BOTHERED }
+                    'Reservoir': _HUMAN_BOTHERED }
           # The one surviving sitelink gate, for the one class whose product rule is renown.
           # Everywhere else in this file sitelinks decide nothing.
-          FLOOR_OVERRIDE = { 'Historic District': 6 }
+          # Lowered 6 -> 4 because the recall report lost Gruene, Charleston and Old Town
+          # Albuquerque at 6 (11,314 -> 437 rows at 4, still small). NRHP District gets the
+          # same gate: it is the class the French Quarter actually lives in, and it would
+          # otherwise bring every listed district in America with it.
+          FLOOR_OVERRIDE = { 'Historic District': 4, 'NRHP District': 4 }
           # THE FLOOR IS MEASURED, NOT GUESSED (2026-09-17).
           # It used to be MIN_SL = {Mountain: 6, Lake: 4, Theater: 4, Stadium: 4, Museum: 3},
           # base 2 -- numbers picked by hand back when sitelinks were the only quality signal
@@ -362,11 +389,8 @@ jobs:
           # book should be able to suggest, and every run prints the ones it did not find,
           # WITH what Wikidata says they are, so a miss arrives as a to-do rather than a mood.
           # It is a test set. It is allowed to be opinionated, and Brandon edits it freely.
-          RECALL = [
+          RECALL_MUST = [
             'The Alamo', 'San Antonio River Walk',
-            'Natural Bridge Caverns', 'Gruene Historic District',
-            'Schlitterbahn', 'Olallie Scenic Area',
-            'Lyndon B. Johnson National Historical Park', 'Bracken Cave',
             'Grand Canyon National Park', 'Yellowstone National Park',
             'Zion National Park', 'Acadia National Park',
             'Crater Lake National Park', 'Great Smoky Mountains National Park',
@@ -374,38 +398,44 @@ jobs:
             'Joshua Tree National Park', 'Carlsbad Caverns National Park',
             'Mount Rushmore National Memorial', 'Statue of Liberty',
             'Independence Hall', 'Gettysburg National Military Park',
-            'Fort Sumter National Historical Park', 'Monticello',
-            'Mount Vernon', 'Graceland',
-            'Biltmore Estate', 'Hearst Castle',
-            'Taliesin West', 'Fallingwater',
-            'Mission San Xavier del Bac', 'San Antonio Missions National Historical Park',
-            'Cahokia Mounds', 'Mesa Verde National Park',
-            'Taos Pueblo', 'Mammoth Cave National Park',
-            'Luray Caverns', 'Meramec Caverns',
-            'Ruby Falls', 'Howe Caverns',
-            'Niagara Falls State Park', 'Multnomah Falls',
-            'Havasu Falls', 'Cannon Beach',
-            'Cape Hatteras National Seashore', 'Lake Tahoe',
+            "Graceland (Elvis Presley's home)", 'Biltmore Estate',
+            'Hearst Castle', 'Mesa Verde National Park',
+            'Mammoth Cave National Park', 'Niagara Falls State Park',
+            'Multnomah Falls', 'Lake Tahoe (California/Nevada)',
+            'Pikes Peak', 'Devils Tower National Monument',
+            'Metropolitan Museum of Art', 'Art Institute of Chicago',
+            'Country Music Hall of Fame and Museum', 'The Getty Center',
+            'Kennedy Space Center Visitor Complex', 'National Air and Space Museum',
+            'San Diego Zoo', 'Monterey Bay Aquarium',
+            'Georgia Aquarium', 'Cedar Point',
+            'Dollywood', 'Disneyland',
+            'Universal Orlando Resort', 'French Quarter',
+            'French Quarter',
+          ]
+          RECALL = [
+            'Natural Bridge Caverns', 'Gruene Historic District',
+            'Schlitterbahn', 'Olallie Scenic Area',
+            'Lyndon B. Johnson National Historical Park', 'Bracken Cave',
+            'Fort Sumter National Historical Park', "Monticello (Thomas Jefferson's house)",
+            'Mount Vernon', 'Taliesin West',
+            'Fallingwater', 'Mission San Xavier del Bac',
+            'San Antonio Missions National Historical Park', 'Cahokia Mounds',
+            'Taos Pueblo', 'Luray Caverns',
+            'Meramec Caverns', 'Ruby Falls',
+            'Howe Caverns', 'Havasu Falls',
+            'Cannon Beach', 'Cape Hatteras National Seashore',
             'Crystal River', 'Hanauma Bay',
-            'Pikes Peak', 'Smith Rock State Park',
-            'Enchanted Rock State Natural Area', 'Devils Tower National Monument',
+            'Smith Rock State Park', 'Enchanted Rock State Natural Area',
             'Garden of the Gods', 'Stone Mountain Park',
-            'Chimney Rock State Park', 'Metropolitan Museum of Art',
-            'Art Institute of Chicago', 'Country Music Hall of Fame and Museum',
-            'The Getty Center', 'Kennedy Space Center Visitor Complex',
-            'Space Center Houston', 'National Air and Space Museum',
+            'Chimney Rock State Park', 'Space Center Houston',
             'Isabella Stewart Gardner Museum', 'Crystal Bridges Museum of American Art',
             'Adler Planetarium', 'Exploratorium',
-            'Corning Museum of Glass', 'San Diego Zoo',
-            'Monterey Bay Aquarium', 'Georgia Aquarium',
-            'Longwood Gardens', 'Dallas Arboretum and Botanical Garden',
-            'Fort Worth Botanic Garden', 'Cedar Point',
-            'Dollywood', 'Silver Dollar City',
-            'Disneyland', 'Universal Orlando Resort',
-            'Kalahari Resorts Wisconsin Dells', "Noah's Ark Water Park",
-            'Blue Ridge Parkway', 'Going-to-the-Sun Road',
-            'Route 66', 'Pearl Street Mall',
-            'Church Street Marketplace', 'French Quarter',
+            'Corning Museum of Glass', 'Longwood Gardens',
+            'Dallas Arboretum and Botanical Garden', 'Fort Worth Botanic Garden',
+            'Silver Dollar City', 'Kalahari Resorts Wisconsin Dells',
+            "Noah's Ark Water Park", 'Blue Ridge Parkway',
+            'Going-to-the-Sun Road', 'Route 66',
+            'Pearl Street Mall', 'Church Street Marketplace',
             'Charleston Historic District', 'Old Town Albuquerque',
             'The High Line', 'Millennium Park',
             'Biltmore Winery', "Jack Daniel's Distillery",
@@ -415,15 +445,16 @@ jobs:
             'Siesta Key Beach', 'Coronado Beach',
             'Lake Chelan', 'Flathead Lake',
             'Lake Powell', 'Lake Mead National Recreation Area',
-            'French Quarter', 'Vieux Carre Historic District',
-            "Jacob's Well Natural Area", 'Hamilton Pool Preserve',
-            'Blanco State Park', 'Wimberley Blue Hole Regional Park',
-            'Palo Duro Canyon State Park', 'Caddo Lake State Park',
-            'Turner Falls Park', 'Beavers Bend State Park',
-            'Silver Falls State Park', 'Painted Hills',
-            'Lava River Cave', 'Sunriver Nature Center',
-            'High Desert Museum', 'Tumalo Falls',
+            'Vieux Carre Historic District', "Jacob's Well Natural Area",
+            'Hamilton Pool Preserve', 'Blanco State Park',
+            'Wimberley Blue Hole Regional Park', 'Palo Duro Canyon State Park',
+            'Caddo Lake State Park', 'Turner Falls Park',
+            'Beavers Bend State Park', 'Silver Falls State Park',
+            'Painted Hills', 'Lava River Cave',
+            'Sunriver Nature Center', 'High Desert Museum',
+            'Tumalo Falls',
           ]
+          RECALL = RECALL_MUST + RECALL
 
           def recall_report(found_names):
             norm = lambda x: re.sub(r'[^a-z0-9]+', ' ', x.lower()).strip()
@@ -440,8 +471,25 @@ jobs:
                 short = min(len(w), len(h))
                 return short >= 12 and (w in h or h in w)
               (hits if any(near(h) for h in have) else misses).append(want)
-            print(f'\n== RECALL: {len(hits)}/{len(RECALL)} of the places a book should be able to'
-                  f' suggest are in this pull ({len(hits)*100//max(len(RECALL),1)}%)')
+            mh = [h for h in hits if h in RECALL_MUST]
+            mm = [m for m in misses if m in RECALL_MUST]
+            pct = len(hits) * 100 // max(len(RECALL), 1)
+            print(f'\n== RECALL: {len(hits)}/{len(RECALL)} overall ({pct}%)')
+            print(f'== MUST-PASS: {len(mh)}/{len(RECALL_MUST)} -- the ones where a miss is a'
+                  f' stop-ship')
+            if mm:
+              print('\n   !! MUST-PASS MISSES. The pull is NOT done:')
+              for m in mm: print(f'      {m}')
+            # THE STOPPING RULE (Brandon, 2026-09-17): "At some point it has to be good enough
+            # and we have to move on. Missing major national parks would be bad, but missing
+            # small beaches we can survive and try to improve later."
+            if not mm and pct >= 85:
+              print('\n== STOPPING RULE MET: every must-pass place is in and overall recall is'
+                    f' {pct}%.\n   STOP REFINING THE PULL. Whatever is still missing below goes'
+                    ' on the wave-2 list.')
+            else:
+              print(f'\n== stopping rule NOT met yet (need every must-pass in, and 85%+ overall;'
+                    f' at {pct}%).')
             if not misses:
               print('   nothing missing.'); return
             # Cap the interrogation. Each miss costs two polite queries and a pause; a run
@@ -456,11 +504,24 @@ jobs:
               if not hit:
                 print(f'   {m:46s} (Wikidata has no obvious item -- check the name)')
               else:
-                h = hit[0]
+                # DO NOT TRUST THE FIRST HIT. On the first real run it resolved Graceland to a
+                # cassette album and Lake Tahoe to a music track, which reads as a class gap
+                # when it is really a bad lookup. Prefer a candidate whose description sounds
+                # like a place, and print the runners-up so a wrong pick is visible.
+                PLACEY = ('park','beach','lake','mountain','museum','site','district','river',
+                          'island','building','area','city','town','trail','cave','falls',
+                          'monument','garden','zoo','distillery','brewery','winery','bay',
+                          'canyon','forest','reserve','refuge','fort','mission','theatre',
+                          'theater','stadium','resort','landmark','house','street')
+                h = next((c for c in hit
+                          if any(w in (c.get('description') or '').lower() for w in PLACEY)),
+                         hit[0])
                 cls = sparql(f'SELECT ?cLabel WHERE {{ wd:{h["id"]} wdt:P31 ?c . '
                              f'SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }} }}')
                 kinds = ', '.join(sorted({b['cLabel']['value'] for b in (cls or [])})) or '(no instance-of)'
                 print(f'   {m:46s} {h["id"]:11s} instance of: {kinds}')
+                alt = [c['id'] for c in hit if c['id'] != h['id']][:2]
+                if alt: print(f'   {"":46s} (other candidates: {", ".join(alt)})')
               time.sleep(1.2)
             if len(misses) > LOOKUP:
               print(f'\n   also missing, not looked up: {", ".join(misses[LOOKUP:])}')
