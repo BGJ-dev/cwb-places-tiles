@@ -112,6 +112,29 @@ jobs:
           for r in rows: byk[r['kind']] = byk.get(r['kind'], 0) + 1
           for k, v in sorted(byk.items(), key=lambda x: -x[1]): print(f'   {k:20s} {v:6d}')
           print('\n== queries that failed (kind, class):', [x for x in report if x[2] == 'FAILED'] or 'none')
+          # A class that answers with ZERO is not a failure and slides past unnoticed. Four of
+          # them have: State Park, National Monument, National Forest and Distillery have been
+          # returning nothing for weeks, and state parks are the biggest hole in a day-trip
+          # layer. Name them, and ask Wikidata what the right QID would have been.
+          zero = sorted({k for k, q, n in report if n == 0} - {k for k, q, n in report if isinstance(n, int) and n > 0})
+          if zero:
+            print('\n== !! CLASSES THAT RETURNED ZERO — almost certainly the wrong QID:')
+            for kind in zero:
+              qids = [q for k, q, n in report if k == kind]
+              print(f'   {kind}  (asked for {", ".join(qids)})')
+              try:
+                u = 'https://www.wikidata.org/w/api.php?' + urllib.parse.urlencode(
+                      {'action': 'wbsearchentities', 'search': kind, 'language': 'en',
+                       'type': 'item', 'limit': 4, 'format': 'json'})
+                req = urllib.request.Request(u, headers={'User-Agent': UA})
+                with urllib.request.urlopen(req, timeout=30) as r: hits = json.load(r).get('search', [])
+                for h in hits:
+                  print(f"      candidate {h['id']:10s} {h.get('label','')} — {h.get('description','')[:64]}")
+              except Exception as e:
+                print(f'      (lookup failed: {type(e).__name__})')
+              time.sleep(1)
+          else:
+            print('\n== every class returned at least one row')
           print('\n== the 30 most famous:')
           for r in rows[:30]: print(f'   {r["sitelinks"]:4d}  {r["name"]}  ({r["kind"]}, {r["locality"]})')
           assert len(rows) > 1000, 'too few destinations — the queries are not answering; the previous release file stays'
