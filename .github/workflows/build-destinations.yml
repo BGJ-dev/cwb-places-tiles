@@ -11,6 +11,11 @@ name: Destinations update
 
 on:
   workflow_dispatch:
+    inputs:
+      discover:
+        description: 'Look up Wikidata classes we might be missing, print candidates, and stop. ~1 min, publishes nothing.'
+        type: boolean
+        default: false
   schedule:
     - cron: '0 10 14 * *'
 
@@ -25,9 +30,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Ask Wikidata, kind by kind
+        env:
+          DISCOVER: ${{ inputs.discover }}
         run: |
           python3 - <<'PY'
-          import json, time, urllib.request, urllib.parse, csv, sys, re
+          import json, time, urllib.request, urllib.parse, csv, sys, re, os
           UA = 'CustomWelcomeBook-destinations/1.0 (STR welcome books; github.com/BGJ-dev/cwb-places-tiles)'
           ENDPOINT = 'https://query.wikidata.org/sparql'
           # kind label → Wikidata classes (direct instance-of); '*' after a QID also walks subclasses (P279*)
@@ -84,6 +91,44 @@ jobs:
                 msg = str(e)[:120]; wait = 15 * (a + 1)
                 print(f'      retry {a+1} in {wait}s — {msg}', flush=True); time.sleep(wait)
             return None
+          def candidates(term):
+            """What QID does Wikidata think this class is? Prints, never adopts."""
+            try:
+              u = 'https://www.wikidata.org/w/api.php?' + urllib.parse.urlencode(
+                    {'action': 'wbsearchentities', 'search': term, 'language': 'en',
+                     'type': 'item', 'limit': 4, 'format': 'json'})
+              req = urllib.request.Request(u, headers={'User-Agent': UA})
+              with urllib.request.urlopen(req, timeout=30) as r: return json.load(r).get('search', [])
+            except Exception as e:
+              print(f'      (lookup failed: {type(e).__name__})'); return []
+
+          # A class-based pull leaks, because Wikidata's typing is inconsistent. Proof: THE
+          # ALAMO is not in our file under any name — the most-visited site in Texas — while
+          # the Minnesota, Arizona and Iowa capitols are in as "Museum" and the Texas one is
+          # not in at all. Also missing: San Antonio River Walk, Natural Bridge Caverns,
+          # Schlitterbahn, Gruene. And the NPS has about twenty designations; we query two,
+          # which is why National Park returns 48 and LBJ National Historical Park is absent.
+          # This step does not guess. It asks Wikidata what each class is called and prints
+          # the candidates, so the QIDs get read by a human before they go in.
+          WANTED = [
+            'national historical park', 'national historic site', 'national recreation area',
+            'national seashore', 'national lakeshore', 'national preserve', 'national memorial',
+            'national battlefield', 'national scenic trail', 'national wildlife refuge',
+            'show cave', 'water park', 'historic district', 'World Heritage Site',
+            'Spanish mission in the Americas', 'fort', 'observation deck', 'planetarium',
+            'science museum', 'arboretum', 'scenic byway', 'pedestrian street',
+            'state historic site', 'county park', 'reservoir', 'wilderness area',
+          ]
+          if os.environ.get('DISCOVER') == 'true':
+            print('== class discovery — nothing is pulled or published\n')
+            for term in WANTED:
+              print(f'  {term}')
+              for h in candidates(term):
+                print(f"      {h['id']:11s} {h.get('label','')[:38]:40s} {h.get('description','')[:64]}")
+              time.sleep(0.8)
+            print('\n== done. Pick the QIDs that say "United States" or match the intent, and add them to KINDS.')
+            sys.exit(0)
+
           seen = {}; report = []
           for kind, classes in KINDS:
             minsl = MIN_SL.get(kind, 2); got = 0
@@ -134,16 +179,8 @@ jobs:
             for kind in zero:
               qids = [q for k, q, n in report if k == kind]
               print(f'   {kind}  (asked for {", ".join(qids)})')
-              try:
-                u = 'https://www.wikidata.org/w/api.php?' + urllib.parse.urlencode(
-                      {'action': 'wbsearchentities', 'search': kind, 'language': 'en',
-                       'type': 'item', 'limit': 4, 'format': 'json'})
-                req = urllib.request.Request(u, headers={'User-Agent': UA})
-                with urllib.request.urlopen(req, timeout=30) as r: hits = json.load(r).get('search', [])
-                for h in hits:
-                  print(f"      candidate {h['id']:10s} {h.get('label','')} — {h.get('description','')[:64]}")
-              except Exception as e:
-                print(f'      (lookup failed: {type(e).__name__})')
+              for h in candidates(kind):
+                print(f"      candidate {h['id']:10s} {h.get('label','')} — {h.get('description','')[:64]}")
               time.sleep(1)
           else:
             print('\n== every class returned at least one row')
