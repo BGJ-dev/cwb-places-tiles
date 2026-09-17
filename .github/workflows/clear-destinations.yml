@@ -49,12 +49,21 @@ jobs:
         with: { python-version: '3.11' }
       - run: pip install requests
 
-      - name: Take the destinations list from the tiles release
+      - name: Take the destinations list, and last run's manifest
         run: |
           set -e
           curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/tiles/us-destinations.csv" -o us-destinations.csv
           wc -l us-destinations.csv
           head -2 us-destinations.csv
+          # The collapse guard below compares this run's candidate count against the last
+          # published one. Without this download it read a file that was never here, so the
+          # guard was dead code -- worse than the one it replaced, which at least fired.
+          # Soft: the first ever run has no previous manifest and must still be allowed.
+          if curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/destinations/destinations-manifest.json" -o prev-manifest.json; then
+            echo "last run: $(python3 -c 'import json;print(json.load(open("prev-manifest.json")).get("candidates"))') candidates"
+          else
+            echo "no previous manifest (first run) -- the collapse guard will not fire"
+          fi
 
       - name: Twelve months of Wikipedia pageviews
         if: ${{ inputs.pageviews }}
@@ -171,7 +180,7 @@ jobs:
               w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
           PY
 
-      - name: Clear, categorise, and build the database
+      - name: Categorise, stage the candidates, and build the database
         run: |
           python3 - <<'PY'
           import csv, sqlite3, os, json, collections
@@ -196,6 +205,18 @@ jobs:
             'Museum':'culture','Historic Site':'culture','Monument':'culture','Lighthouse':'culture',
             'Theater':'culture',
             'Winery':'maker','Brewery':'maker','Distillery':'maker',
+            # the fifteen classes added to the puller on 2026-09-17 from the sizing run's
+            # discovery pass. A kind the puller emits but this map does not name is thrown
+            # away as "no category", silently -- verify-destinations-pair.py is the gate.
+            'Show Cave':'attraction','Water Park':'attraction','Observation Deck':'attraction',
+            'Historic District':'culture','World Heritage Site':'culture','Fort':'culture',
+            'Planetarium':'culture','Science Museum':'culture','Pedestrian Street':'culture',
+            'State Historic Site':'culture',
+            'Arboretum':'outdoors','Scenic Route':'outdoors','County Park':'outdoors',
+            'Reservoir':'outdoors','Wilderness Area':'outdoors',
+            # added with the puller's four new classes, 2026-09-17
+            'Scenic Area':'outdoors','National Scenic Area':'outdoors',
+            'State Forest':'outdoors','State Recreation Area':'outdoors',
           }
           # Deliberately not wave 1. A stadium is an event with a date; a ski area needs the
           # season field to be honest in print. Both are in the puller's output on purpose --
