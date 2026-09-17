@@ -102,19 +102,44 @@ jobs:
                                'nothing below will work; read the status above')
 
           # ---- 1. qid -> English Wikipedia title ----
+          # THIS STEP HAD NO BACKOFF AND IT SHOWED (2026-09-17). On a 29,219-row file it
+          # printed hundreds of "titles at NNNNN: JSONDecodeError" and matched only 9,933
+          # articles -- a JSONDecodeError here is Wikidata answering with an HTML throttle page
+          # instead of JSON, so most of that shortfall was refusals, not places without an
+          # article. The pageviews fetch below already knew to back off; this one did not.
+          # Now: retry with growing waits, honour Retry-After, tally what happened, and say
+          # plainly if coverage came out too low to trust.
           S = requests.Session(); S.headers['User-Agent'] = UA
           titles, ids = {}, [r['qid'] for r in rows]
+          tcodes = collections.Counter()
           for i in range(0, len(ids), 50):
-              try:
-                  r = S.get('https://www.wikidata.org/w/api.php', timeout=60, params={
-                      'action': 'wbgetentities', 'ids': '|'.join(ids[i:i+50]),
-                      'props': 'sitelinks', 'sitefilter': 'enwiki', 'format': 'json'})
-                  for q, e in (r.json().get('entities') or {}).items():
-                      t = (e.get('sitelinks') or {}).get('enwiki', {}).get('title')
-                      if t: titles[q] = t
-              except Exception as e:
-                  print(f'   titles at {i}: {type(e).__name__}', flush=True)
-          print(f'{len(titles):,} of {len(rows):,} have an English Wikipedia article\n', flush=True)
+              for attempt in range(4):
+                  try:
+                      r = S.get('https://www.wikidata.org/w/api.php', timeout=60, params={
+                          'action': 'wbgetentities', 'ids': '|'.join(ids[i:i+50]),
+                          'props': 'sitelinks', 'sitefilter': 'enwiki', 'format': 'json'})
+                      if r.status_code in (429, 503):
+                          tcodes[r.status_code] += 1
+                          time.sleep(min(float(r.headers.get('retry-after') or 5 * (attempt + 1)), 60))
+                          continue
+                      ents = (r.json().get('entities') or {})
+                      for q, e in ents.items():
+                          t = (e.get('sitelinks') or {}).get('enwiki', {}).get('title')
+                          if t: titles[q] = t
+                      tcodes['ok'] += 1
+                      break
+                  except Exception as e:
+                      tcodes[type(e).__name__] += 1
+                      if attempt == 3:
+                          print(f'   titles at {i}: gave up after 4 tries ({type(e).__name__})', flush=True)
+                      else:
+                          time.sleep(3 * (attempt + 1))
+              time.sleep(0.2)
+          print(f'{len(titles):,} of {len(rows):,} have an English Wikipedia article'
+                f'  ·  batches: {dict(tcodes.most_common())}\n', flush=True)
+          if tcodes['ok'] < (len(ids) + 49) // 50 * 0.9:
+              print('!! more than a tenth of the title batches failed -- the view counts below will'
+                    '\n   be thin. They are an attribute, not a gate, so this is not fatal.\n', flush=True)
 
           # ---- 2. views, politely ----
           # In file order. This used to run descending by sitelinks so that a time budget was
@@ -217,6 +242,9 @@ jobs:
             # added with the puller's four new classes, 2026-09-17
             'Scenic Area':'outdoors','National Scenic Area':'outdoors',
             'State Forest':'outdoors','State Recreation Area':'outdoors',
+            # named by the first recall report, 2026-09-17
+            'Mission':'culture','NRHP District':'culture',
+            'Urban Park':'outdoors','Bay':'outdoors',
           }
           # Deliberately not wave 1. A stadium is an event with a date; a ski area needs the
           # season field to be honest in print. Both are in the puller's output on purpose --
