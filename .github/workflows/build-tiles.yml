@@ -45,6 +45,10 @@ on:
         description: 'Also knock on ~480 websites and report the dead rate by year (adds ~3 min)'
         type: boolean
         default: false
+      release:
+        description: 'Foursquare release to build from (e.g. 2026-08-11). Leave blank for the latest. This is the rollback: publishing overwrites the tiles release in place, so pinning an older dt is the only way back to a file we already trusted.'
+        type: string
+        default: ''
   schedule:
     - cron: '0 10 1,15 * *'
 
@@ -112,6 +116,8 @@ jobs:
 
       - name: Find Foursquare's latest release
         id: rel
+        env:
+          PIN: ${{ inputs.release }}
         run: |
           python3 - <<'PY'
           import json, os, re, urllib.request
@@ -119,8 +125,14 @@ jobs:
           items = json.load(urllib.request.urlopen(url))
           dts = sorted(re.sub(r'.*dt=', '', i['path']) for i in items if i.get('type') == 'directory' and 'dt=' in i['path'])
           assert dts, 'no dt= partitions found on Hugging Face'
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f: f.write('dt=' + dts[-1] + '\n')
-          print('latest Foursquare release:', dts[-1])
+          print('releases available:', ', '.join(dts[-4:]))
+          pin = (os.environ.get('PIN') or '').strip()
+          if pin:
+              assert pin in dts, f'release {pin} is not on Hugging Face; available: {dts}'
+              dt = pin; print('PINNED to release:', dt)
+          else:
+              dt = dts[-1]; print('latest Foursquare release:', dt)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f: f.write('dt=' + dt + '\n')
           PY
 
       - name: Extract US open places in our six categories — rules v8 (download each file, classify, score, delete relics, flag dead sites, dedupe)
@@ -272,7 +284,7 @@ jobs:
               cat_case = 'CASE '
               for k, rx in RULES['cat10'].items():
                   cat_case += f"WHEN regexp_matches(prim, {q(rx)}) THEN '{k}' "
-              cat_case += "ELSE 'none' END
+              cat_case += "ELSE 'none' END"
               return f"""
                 SELECT CAST(fsq_place_id AS VARCHAR) AS id, CAST(name AS VARCHAR) AS name, CAST(latitude AS DOUBLE) AS lat, CAST(longitude AS DOUBLE) AS lon,
                        coalesce({txt('address')},'') AS address, coalesce({txt('locality')},'') AS locality,
