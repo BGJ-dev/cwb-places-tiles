@@ -245,11 +245,22 @@ jobs:
             # named by the first recall report, 2026-09-17
             'Mission':'culture','NRHP District':'culture',
             'Urban Park':'outdoors','Bay':'outdoors','Resort':'attraction',
+            # back in wave 1 on 2026-09-17; the judge splits the big ticketed venue from the
+            # minor-league ballpark and the summer gondola, which no class rule could do
+            'Stadium':'attraction','Ski Area':'outdoors',
           }
-          # Deliberately not wave 1. A stadium is an event with a date; a ski area needs the
-          # season field to be honest in print. Both are in the puller's output on purpose --
-          # they are excluded HERE so the puller stays untouched and we can change our mind.
-          NEVER = {'Stadium', 'Ski Area'}
+          # EMPTY, AND DELIBERATELY SO (2026-09-17). This used to hold Stadium and Ski Area on
+          # my reasoning that a stadium is an event with a date and a ski area is wrong in print
+          # for eight months of the year. The seasonality worry was right; excluding the class
+          # was the wrong remedy -- it threw away the ski area that runs a gondola in July for
+          # hikers, which is often the only thing in its town, and the judge's prompt already
+          # says to add "summer only" when it changes the visit.
+          # Brandon's line settled the rest: a 70,000-seat NFL stadium on a Tuesday is nothing,
+          # and a minor-league ballpark on a July evening -- cheap seats, always available, a
+          # night no visitor knew about -- is a great suggestion. Same class, opposite answers.
+          # That is the signature of a per-row judgement, not a class rule. So there are no
+          # class-level exclusions left in wave 1. Everything is decided one row at a time.
+          NEVER = set()
 
           out, why = [], collections.Counter()
           for r in rows:
@@ -284,7 +295,8 @@ jobs:
                 'locality': r.get('locality',''), 'region': r.get('region',''),
                 'cat': cat, 'kind': kind, 'wave': 1,
                 'cleared_at': None, 'cleared_by': None,
-                'verdict': None, 'confidence': None, 'pull': None, 'description': None,
+                'verdict': None, 'confidence': None, 'pull': None, 'news': None,
+                'description': None,
                 'draw': draw, 'draw_basis': basis, 'vouch': vouch,
                 'sitelinks': sl, 'seasonality': (float(seas) if seas else None),
                 'official_url': '', 'wikidata_qid': r['qid'], 'enwiki': r.get('enwiki',''),
@@ -323,7 +335,7 @@ jobs:
               locality TEXT, region TEXT, cat TEXT, kind TEXT, wave INTEGER,
               cleared_at TEXT, cleared_by TEXT,
               -- the judge's four fields. Empty until it has read the row.
-              verdict TEXT, confidence TEXT, pull INTEGER, description TEXT,
+              verdict TEXT, confidence TEXT, pull INTEGER, news INTEGER, description TEXT,
               -- attributes. None of these decides what a guest is shown.
               draw INTEGER, draw_basis TEXT, vouch INTEGER, sitelinks INTEGER, seasonality REAL,
               official_url TEXT, wikidata_qid TEXT, enwiki TEXT, fsq_id TEXT);
