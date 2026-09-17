@@ -168,6 +168,7 @@ jobs:
             ('NRHP District',        ['Q20856087']),
             ('Urban Park',           ['Q22698*']),
             ('Bay',                  ['Q39816']),
+            ('Resort',               ['Q875157']),   # Universal Orlando; Disneyland arrives as a theme park
           ]
           # MOUNTAIN, LAKE AND BEACH ARE NOT LIKE THE OTHERS (2026-09-17, measured).
           # 90% of Mountain, 70% of Lake and 88% of Beach are items with exactly one
@@ -390,77 +391,142 @@ jobs:
           # WITH what Wikidata says they are, so a miss arrives as a to-do rather than a mood.
           # It is a test set. It is allowed to be opinionated, and Brandon edits it freely.
           RECALL_MUST = [
-            'The Alamo', 'San Antonio River Walk',
-            'Grand Canyon National Park', 'Yellowstone National Park',
-            'Zion National Park', 'Acadia National Park',
-            'Crater Lake National Park', 'Great Smoky Mountains National Park',
-            'Rocky Mountain National Park', 'Everglades National Park',
-            'Joshua Tree National Park', 'Carlsbad Caverns National Park',
-            'Mount Rushmore National Memorial', 'Statue of Liberty',
-            'Independence Hall', 'Gettysburg National Military Park',
-            "Graceland (Elvis Presley's home)", 'Biltmore Estate',
-            'Hearst Castle', 'Mesa Verde National Park',
-            'Mammoth Cave National Park', 'Niagara Falls State Park',
-            'Multnomah Falls', 'Lake Tahoe (California/Nevada)',
-            'Pikes Peak', 'Devils Tower National Monument',
-            'Metropolitan Museum of Art', 'Art Institute of Chicago',
-            'Country Music Hall of Fame and Museum', 'The Getty Center',
-            'Kennedy Space Center Visitor Complex', 'National Air and Space Museum',
-            'San Diego Zoo', 'Monterey Bay Aquarium',
-            'Georgia Aquarium', 'Cedar Point',
-            'Dollywood', 'Disneyland',
-            'Universal Orlando Resort', 'French Quarter',
-            'French Quarter',
+            ('The Alamo', 'Q2636724'),
+            ('San Antonio River Walk', 'Q4311109'),
+            ('Grand Canyon National Park', ''),
+            ('Yellowstone National Park', ''),
+            ('Zion National Park', 'Q205325'),
+            ('Acadia National Park', 'Q337396'),
+            ('Crater Lake National Park', 'Q239304'),
+            ('Great Smoky Mountains National Park', ''),
+            ('Rocky Mountain National Park', ''),
+            ('Everglades National Park', ''),
+            ('Joshua Tree National Park', 'Q735202'),
+            ('Carlsbad Caverns National Park', ''),
+            ('Mount Rushmore National Memorial', ''),
+            ('Statue of Liberty', ''),
+            ('Independence Hall', ''),
+            ('Gettysburg National Military Park', ''),
+            ('Graceland', ''),
+            ('Biltmore Estate', 'Q585521'),
+            ('Hearst Castle', ''),
+            ('Mesa Verde National Park', ''),
+            ('Mammoth Cave National Park', ''),
+            ('Niagara Falls State Park', ''),
+            ('Multnomah Falls', ''),
+            ('Lake Tahoe', ''),
+            ('Pikes Peak', ''),
+            ('Devils Tower National Monument', ''),
+            ('Metropolitan Museum of Art', ''),
+            ('Art Institute of Chicago', ''),
+            ('Country Music Hall of Fame and Museum', ''),
+            ('The Getty Center', ''),
+            ('Kennedy Space Center Visitor Complex', ''),
+            ('National Air and Space Museum', ''),
+            ('San Diego Zoo', ''),
+            ('Monterey Bay Aquarium', ''),
+            ('Georgia Aquarium', ''),
+            ('Cedar Point', ''),
+            ('Dollywood', ''),
+            ('Disneyland', 'Q181185'),
+            ('Universal Orlando Resort', 'Q778011'),
+            ('French Quarter', 'Q602939'),
+            ('French Quarter', 'Q602939'),
           ]
           RECALL = [
-            'Natural Bridge Caverns', 'Gruene Historic District',
-            'Schlitterbahn', 'Olallie Scenic Area',
-            'Lyndon B. Johnson National Historical Park', 'Bracken Cave',
-            'Fort Sumter National Historical Park', "Monticello (Thomas Jefferson's house)",
-            'Mount Vernon', 'Taliesin West',
-            'Fallingwater', 'Mission San Xavier del Bac',
-            'San Antonio Missions National Historical Park', 'Cahokia Mounds',
-            'Taos Pueblo', 'Luray Caverns',
-            'Meramec Caverns', 'Ruby Falls',
-            'Howe Caverns', 'Havasu Falls',
-            'Cannon Beach', 'Cape Hatteras National Seashore',
-            'Crystal River', 'Hanauma Bay',
-            'Smith Rock State Park', 'Enchanted Rock State Natural Area',
-            'Garden of the Gods', 'Stone Mountain Park',
-            'Chimney Rock State Park', 'Space Center Houston',
-            'Isabella Stewart Gardner Museum', 'Crystal Bridges Museum of American Art',
-            'Adler Planetarium', 'Exploratorium',
-            'Corning Museum of Glass', 'Longwood Gardens',
-            'Dallas Arboretum and Botanical Garden', 'Fort Worth Botanic Garden',
-            'Silver Dollar City', 'Kalahari Resorts Wisconsin Dells',
-            "Noah's Ark Water Park", 'Blue Ridge Parkway',
-            'Going-to-the-Sun Road', 'Route 66',
-            'Pearl Street Mall', 'Church Street Marketplace',
-            'Charleston Historic District', 'Old Town Albuquerque',
-            'The High Line', 'Millennium Park',
-            'Biltmore Winery', "Jack Daniel's Distillery",
-            'Buffalo Trace Distillery', "Maker's Mark Distillery",
-            'Sierra Nevada Brewing Co.', 'Napa Valley Wine Train',
-            'Hoʻokena Beach Park', 'Cape Disappointment State Park',
-            'Siesta Key Beach', 'Coronado Beach',
-            'Lake Chelan', 'Flathead Lake',
-            'Lake Powell', 'Lake Mead National Recreation Area',
-            'Vieux Carre Historic District', "Jacob's Well Natural Area",
-            'Hamilton Pool Preserve', 'Blanco State Park',
-            'Wimberley Blue Hole Regional Park', 'Palo Duro Canyon State Park',
-            'Caddo Lake State Park', 'Turner Falls Park',
-            'Beavers Bend State Park', 'Silver Falls State Park',
-            'Painted Hills', 'Lava River Cave',
-            'Sunriver Nature Center', 'High Desert Museum',
-            'Tumalo Falls',
+            ('Natural Bridge Caverns', ''),
+            ('Gruene Historic District', 'Q75295306'),
+            ('Schlitterbahn', ''),
+            ('Olallie Scenic Area', ''),
+            ('Lyndon B. Johnson National Historical Park', ''),
+            ('Bracken Cave', ''),
+            ('Fort Sumter National Historical Park', ''),
+            ('Monticello', ''),
+            ('Mount Vernon', ''),
+            ('Taliesin West', 'Q1208310'),
+            ('Fallingwater', ''),
+            ('Mission San Xavier del Bac', 'Q489984'),
+            ('San Antonio Missions National Historical Park', ''),
+            ('Cahokia Mounds', 'Q333661'),
+            ('Taos Pueblo', ''),
+            ('Luray Caverns', ''),
+            ('Meramec Caverns', ''),
+            ('Ruby Falls', ''),
+            ('Howe Caverns', ''),
+            ('Havasu Falls', ''),
+            ('Cannon Beach', 'Q988747'),
+            ('Cape Hatteras National Seashore', ''),
+            ('Crystal River', ''),
+            ('Hanauma Bay', 'Q1574284'),
+            ('Smith Rock State Park', ''),
+            ('Enchanted Rock State Natural Area', ''),
+            ('Garden of the Gods', ''),
+            ('Stone Mountain Park', ''),
+            ('Chimney Rock State Park', ''),
+            ('Space Center Houston', ''),
+            ('Isabella Stewart Gardner Museum', ''),
+            ('Crystal Bridges Museum of American Art', ''),
+            ('Adler Planetarium', ''),
+            ('Exploratorium', ''),
+            ('Corning Museum of Glass', ''),
+            ('Longwood Gardens', ''),
+            ('Dallas Arboretum and Botanical Garden', ''),
+            ('Fort Worth Botanic Garden', ''),
+            ('Silver Dollar City', ''),
+            ('Kalahari Resorts Wisconsin Dells', ''),
+            ("Noah's Ark Water Park", ''),
+            ('Blue Ridge Parkway', ''),
+            ('Going-to-the-Sun Road', 'Q3109921'),
+            ('Route 66', 'Q79934'),
+            ('Pearl Street Mall', 'Q7158173'),
+            ('Church Street Marketplace', 'Q5116712'),
+            ('Charleston Historic District', 'Q5084151'),
+            ('Old Town Albuquerque', 'Q7085263'),
+            ('The High Line', 'Q843869'),
+            ('Millennium Park', 'Q1130516'),
+            ('Biltmore Winery', ''),
+            ("Jack Daniel's Distillery", 'Q47536037'),
+            ('Buffalo Trace Distillery', ''),
+            ("Maker's Mark Distillery", ''),
+            ('Sierra Nevada Brewing Co.', 'Q2289193'),
+            ('Napa Valley Wine Train', 'Q6964806'),
+            ('Hoʻokena Beach Park', 'Q49503651'),
+            ('Cape Disappointment State Park', ''),
+            ('Siesta Key Beach', 'Q7511756'),
+            ('Coronado Beach', 'Q49320439'),
+            ('Lake Chelan', ''),
+            ('Flathead Lake', 'Q1427364'),
+            ('Lake Powell', ''),
+            ('Lake Mead National Recreation Area', ''),
+            ('Vieux Carre Historic District', 'Q49575133'),
+            ("Jacob's Well Natural Area", ''),
+            ('Hamilton Pool Preserve', ''),
+            ('Blanco State Park', ''),
+            ('Wimberley Blue Hole Regional Park', ''),
+            ('Palo Duro Canyon State Park', ''),
+            ('Caddo Lake State Park', ''),
+            ('Turner Falls Park', ''),
+            ('Beavers Bend State Park', 'Q34894922'),
+            ('Silver Falls State Park', ''),
+            ('Painted Hills', ''),
+            ('Lava River Cave', ''),
+            ('Sunriver Nature Center', 'Q115523291'),
+            ('High Desert Museum', ''),
+            ('Tumalo Falls', ''),
           ]
           RECALL = RECALL_MUST + RECALL
 
-          def recall_report(found_names):
+          def recall_report(found_names, found_qids):
+            # MATCH ON THE QID WHENEVER THE LIST CARRIES ONE. Name matching told us three
+            # separate lies on the 2026-09-17 run -- Graceland resolved to a cassette album,
+            # Lake Tahoe to a music track, and The Alamo to Q235344, which is the BATTLE and
+            # not the mission a guest visits. A QID cannot be misread.
             norm = lambda x: re.sub(r'[^a-z0-9]+', ' ', x.lower()).strip()
             have = {norm(n) for n in found_names}
             hits, misses = [], []
-            for want in RECALL:
+            for want, qid in RECALL:
+              if qid:
+                (hits if qid in found_qids else misses).append(want); continue
               w = norm(want)
               # A substring match on a SHORT name is a false positive waiting to happen --
               # "Monticello" would claim a hit on "Monticello Dam" and hide a real miss. So a
@@ -471,8 +537,9 @@ jobs:
                 short = min(len(w), len(h))
                 return short >= 12 and (w in h or h in w)
               (hits if any(near(h) for h in have) else misses).append(want)
-            mh = [h for h in hits if h in RECALL_MUST]
-            mm = [m for m in misses if m in RECALL_MUST]
+            mustnames = {n for n, _ in RECALL_MUST}
+            mh = [h for h in hits if h in mustnames]
+            mm = [m for m in misses if m in mustnames]
             pct = len(hits) * 100 // max(len(RECALL), 1)
             print(f'\n== RECALL: {len(hits)}/{len(RECALL)} overall ({pct}%)')
             print(f'== MUST-PASS: {len(mh)}/{len(RECALL_MUST)} -- the ones where a miss is a'
@@ -604,7 +671,7 @@ jobs:
             print('\n== done. Pick the QIDs that say "United States" or match the intent, and add them to KINDS.')
             sys.exit(0)
 
-          seen = {}; report = []
+          seen = {}; report = []; counted = {}
           for kind, classes in KINDS:
             got = 0
             for cls in classes:
@@ -659,6 +726,7 @@ jobs:
                 if item not in seen:
                   seen[item] = {'qid': item, 'name': name[:80], 'lat': round(lat, 5), 'lon': round(lon, 5), 'kind': kind, 'sitelinks': sl, 'locality': b.get('adminLabel', {}).get('value', '')[:60], 'region': ''}
                   n += 1
+              counted[kind] = counted.get(kind, 0) + len(rows)
               got += n; report.append((kind, qid, n)); time.sleep(1.5)
             print(f'  {kind:20s} {got:6d}', flush=True)
           # Ordered by name. It used to be ordered by sitelinks, which made the file itself
@@ -677,7 +745,19 @@ jobs:
           # them have: State Park, National Monument, National Forest and Distillery have been
           # returning nothing for weeks, and state parks are the biggest hole in a day-trip
           # layer. Name them, and ask Wikidata what the right QID would have been.
-          zero = sorted({k for k, q, n in report if n == 0} - {k for k, q, n in report if isinstance(n, int) and n > 0})
+          # A CLASS CAN RETURN ROWS AND STILL REPORT ZERO, because "the first kind wins" gives
+          # its items to an earlier, broader class. On 2026-09-17 Reservoir, Science Museum and
+          # State Historic Site all reported zero while their places were sitting in the file
+          # under Lake, Museum and Historic Site -- Q23397* and Q33506* swallow them by design.
+          # That is correct behaviour and a false alarm. Only shout when the QUERY found nothing.
+          zero = sorted({k for k, q, n in report if n == 0 and counted.get(k, 0) == 0}
+                        - {k for k, q, n in report if isinstance(n, int) and n > 0})
+          absorbed = sorted({k for k, q, n in report if n == 0 and counted.get(k, 0) > 0}
+                            - {k for k, q, n in report if isinstance(n, int) and n > 0})
+          if absorbed:
+            print('\n== these classes found rows, but every one was already claimed by a broader'
+                  '\n   class earlier in the list. Nothing is missing:')
+            for k in absorbed: print(f'   {k}  ({counted[k]:,} rows, all already in the file)')
           if zero:
             print('\n== !! CLASSES THAT RETURNED ZERO — almost certainly the wrong QID:')
             for kind in zero:
@@ -688,7 +768,7 @@ jobs:
               time.sleep(1)
           else:
             print('\n== every class returned at least one row')
-          recall_report([r['name'] for r in rows])
+          recall_report([r['name'] for r in rows], {r['qid'] for r in rows})
           print('\n== a sample of 30, evenly spread through the file (NOT a ranking):')
           step = max(1, len(rows) // 30)
           for r in rows[::step][:30]: print(f'   {r["sitelinks"]:4d} sl  {r["name"]}  ({r["kind"]}, {r["locality"]})')
