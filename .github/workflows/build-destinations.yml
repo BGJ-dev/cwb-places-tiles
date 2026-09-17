@@ -268,6 +268,42 @@ jobs:
             b = r[0]
             return {f: int(b[f'f{f}']['value']) for f in FLOOR_STEPS if f'f{f}' in b}
 
+          def sample_excluded(kind, path, qid, rule, n_all, n_kept):
+            """SHOW WHAT THE RULE THROWS AWAY. An exclusion rule that nobody has read the
+               output of is a guess with a number attached -- the same mistake as the sitelink
+               floor. So for every class carrying a rule, print a spread sample of the rows it
+               DROPS and a few it KEEPS, and let a human read the names."""
+            dropped = n_all - n_kept
+            print(f'\n   --- {kind}: {n_all:,} in all, KEEPS {n_kept:,}, DROPS {dropped:,} '
+                  f'({dropped*100//max(n_all,1)}%) ---', flush=True)
+            if dropped <= 0:
+              print('       nothing dropped.'); return
+            def grab(neg, count, label):
+              seen_names = []
+              spots = [0] if count <= 30 else [0, count // 3, (2 * count) // 3]
+              for off in spots:
+                clause = (f'FILTER NOT EXISTS {{ {rule} }}' if neg else f'{rule} .')
+                q = f'''SELECT ?item ?itemLabel ?sl ?adminLabel WHERE {{
+                  ?item {path} wd:{qid} ; wdt:P17 wd:Q30 ; wdt:P625 ?coord ; wikibase:sitelinks ?sl .
+                  {clause}
+                  OPTIONAL {{ ?item wdt:P131 ?admin . }}
+                  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
+                }} ORDER BY ?item LIMIT 10 OFFSET {off}'''
+                r = sparql(q)
+                if not r: continue
+                for b in r:
+                  nm = b.get('itemLabel', {}).get('value', '')
+                  if not nm or nm.startswith('Q'): continue
+                  seen_names.append((nm, int(b['sl']['value']),
+                                     b.get('adminLabel', {}).get('value', '')[:28]))
+                time.sleep(1.5)
+              print(f'       {label}:')
+              for nm, sl, loc in seen_names[:30]:
+                print(f'         {sl:3d} sl  {nm[:52]:54s} {loc}')
+              if not seen_names: print('         (the endpoint did not answer)')
+            grab(True,  dropped, 'DROPPED by the rule -- read these, they are the ones at risk')
+            grab(False, n_kept,  'KEPT, for contrast')
+
           def pick_floor(counts):
             """The lowest floor that fits under the cap. 0 whenever the class is small enough."""
             for f in FLOOR_STEPS:
@@ -403,7 +439,25 @@ jobs:
                 if f > 0: capped.append((kind, cls, c.get(0, 0), c.get(f, 0), f))
                 tot_now += c.get(2, 0); tot_new += c.get(f, 0)
                 time.sleep(2)
-            print(f'\n== at the OLD base floor of 2 these classes hold {tot_now:,} rows.')
+            # THE SANITY CHECK ON THE EXCLUSION RULES. Brandon asked for it by name, and he
+            # was right to: 62,000 rows were about to be dropped on a rule nobody had read the
+            # output of. This prints what each rule keeps and what it throws away.
+            print('\n\n== WHAT THE IMAGE-OR-WEBSITE RULE ACTUALLY DROPS')
+            print('   (the rule: the Wikidata item must carry an image (P18) or an official'
+                  '\n    website (P856) -- evidence a human bothered with the place)')
+            for kind, classes in KINDS:
+              rule = EXTRA.get(kind)
+              if not rule: continue
+              for cls in classes:
+                walk = cls.endswith('*'); qid = cls.rstrip('*')
+                path = 'wdt:P31/wdt:P279*' if walk else 'wdt:P31'
+                c_all  = count_by_floor(path, qid, '')
+                c_keep = count_by_floor(path, qid, rule)
+                if c_all is None or c_keep is None:
+                  print(f'\n   --- {kind}: the endpoint did not answer ---'); continue
+                sample_excluded(kind, path, qid, rule, c_all.get(0, 0), c_keep.get(0, 0))
+
+            print(f'\n\n== at the OLD base floor of 2 these classes hold {tot_now:,} rows.')
             print(f'== at the measured floors they hold {tot_new:,}. That number sizes the judging run.')
             # A CAP THAT TRUNCATES SILENTLY IS A FILTER PRETENDING TO BE PLUMBING. When it
             # binds, raising the sitelink floor is selecting by fame -- the exact thing this
