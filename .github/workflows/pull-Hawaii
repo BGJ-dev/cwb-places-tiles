@@ -1,0 +1,178 @@
+# .github/workflows/pull-wave14.yml
+#
+# WAVE 1.4 PULL — two gaps the 2026-10-06 town recall test found in the places library, both Wikidata's to fill:
+#
+#   1. HAWAII (and Puerto Rico / the U.S. Virgin Islands) have ZERO rows in the library — not even rejected ones.
+#      Cause: build-destinations.yml keeps a row only if 24 <= lat <= 72. Hawaii lies at 18.9–22.3°N, Puerto Rico
+#      at 17.9–18.5°N. The comment on that line says "incl. Alaska/Hawaii"; the number says otherwise. This job runs
+#      the same class list with the box widened to 17.5 <= lat <= 72, and keeps only rows SOUTH of 24° so nothing
+#      already in the library is pulled twice.
+#   2. THE RECALL MISSES — places a travel guide names for a rental town that no class in the list ever asked for
+#      (historic houses, observatories, scenic highways, heritage railroads, bridges, geysers, race tracks…). The
+#      places session supplies their Wikidata ids in qids.txt (one per line); this job pulls them BY ID, so no class
+#      guessing is involved, and records what Wikidata says each one is.
+#
+# Output: a release called "wave14" holding wave14-hawaii.csv, wave14-recall.csv and wave14-summary.txt, in the
+# same shape as us-destinations.csv (qid, name, lat, lon, kind, sitelinks, locality, region) plus two columns the
+# judge likes to have: official_url (P856) and enwiki (the English article title). Wikidata is CC0.
+# Run it in the PRIVATE cwb-archive repository. The places session judges the rows; nothing here is judged.
+name: Wave 1.4 pull (Hawaii + recall misses)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ask Wikidata
+        run: |
+          python3 - <<'PY'
+          import csv, json, os, re, sys, time, urllib.request, urllib.parse
+          UA = 'CustomWelcomeBook-wave14/1.0 (STR welcome books; places library)'
+          ENDPOINT = 'https://query.wikidata.org/sparql'
+          API = 'https://www.wikidata.org/w/api.php'
+          L = []
+          def say(x=''): print(x, flush=True); L.append(str(x))
+
+          # THE SAME CLASS LIST AS build-destinations.yml (2026-09-17 version), in the same order; the first kind wins.
+          KINDS = [
+            ('National Park', ['Q46169', 'Q34918903']), ('Nature Preserve', ['Q179049', 'Q1310307']), ('Waterfall', ['Q34038']),
+            ('Beach', ['Q40080']), ('Lake', ['Q23397*']), ('Cave', ['Q35509']), ('Hot Spring', ['Q177380']), ('Canyon', ['Q150784']),
+            ('Mountain', ['Q8502']), ('Scenic Lookout', ['Q1440300', 'Q6017969']), ('Botanical Garden', ['Q167346']), ('Zoo', ['Q43501']),
+            ('Aquarium', ['Q2281788']), ('Amusement Park', ['Q194195', 'Q3467128', 'Q2416723']), ('Museum', ['Q33506*']),
+            ('Historic Site', ['Q1081138', 'Q839954', 'Q23413']), ('Monument', ['Q4989906']), ('Lighthouse', ['Q39715']),
+            ('Ski Area', ['Q130003']), ('Winery', ['Q156362']), ('Brewery', ['Q131734']), ('Stadium', ['Q483110']),
+            ('Theater', ['Q11635', 'Q24354']), ('Tourist Attraction', ['Q570116']), ('State Park', ['Q1761072*']),
+            ('National Monument', ['Q893775']), ('National Forest', ['Q612741']), ('Distillery', ['Q1251750*']),
+            ('National Historical Park', ['Q15836337']), ('National Historic Site', ['Q1258086']), ('National Recreation Area', ['Q1132998']),
+            ('National Seashore', ['Q941043']), ('National Preserve', ['Q841646']), ('National Memorial', ['Q1967454']),
+            ('National Battlefield', ['Q35432882']), ('National Scenic Trail', ['Q12063557']), ('Wildlife Refuge', ['Q1410668']),
+            ('Show Cave', ['Q2232001']), ('Water Park', ['Q740326']), ('Historic District', ['Q15243209']), ('World Heritage Site', ['Q9259']),
+            ('Fort', ['Q1785071']), ('Observation Deck', ['Q177305']), ('Planetarium', ['Q148319']), ('Science Museum', ['Q588140*']),
+            ('Arboretum', ['Q272231']), ('Scenic Route', ['Q1406331']), ('Pedestrian Street', ['Q62685721']), ('State Historic Site', ['Q28042933*']),
+            ('County Park', ['Q5177940']), ('Reservoir', ['Q131681']), ('Wilderness Area', ['Q27995042']), ('Scenic Area', ['Q106695446']),
+            ('National Scenic Area', ['Q6978245']), ('State Forest', ['Q2324919']), ('State Recreation Area', ['Q113033132']),
+            ('Mission', ['Q1564373']), ('NRHP District', ['Q20856087']), ('Urban Park', ['Q22698*']), ('Bay', ['Q39816']), ('Resort', ['Q875157']),
+          ]
+          HUMAN = '{ ?item wdt:P18 ?img } UNION { ?item wdt:P856 ?site }'
+          EXTRA = {'Mountain': HUMAN, 'Lake': HUMAN, 'Reservoir': HUMAN}
+          FLOOR = {'Historic District': 4, 'NRHP District': 4}
+
+          def sparql(q, tries=4):
+            data = urllib.parse.urlencode({'query': q, 'format': 'json'}).encode()
+            for a in range(tries):
+              try:
+                req = urllib.request.Request(ENDPOINT, data=data, headers={'User-Agent': UA, 'Accept': 'application/sparql-results+json'})
+                with urllib.request.urlopen(req, timeout=120) as r: return json.load(r)['results']['bindings']
+              except Exception as e:
+                say(f'      retry {a+1}: {str(e)[:100]}'); time.sleep(15 * (a + 1))
+            return None
+
+          def row_of(b, kind):
+            m = re.match(r'Point\(([-\d.]+) ([-\d.]+)\)', b['coord']['value'])
+            if not m: return None
+            item = b['item']['value'].rsplit('/', 1)[-1]; name = b.get('itemLabel', {}).get('value', '')
+            if not name or name == item: return None
+            lon, lat = float(m.group(1)), float(m.group(2))
+            return {'qid': item, 'name': name[:80], 'lat': round(lat, 5), 'lon': round(lon, 5), 'kind': kind,
+                    'sitelinks': int(b['sl']['value']), 'locality': b.get('adminLabel', {}).get('value', '')[:60], 'region': '',
+                    'official_url': b.get('site', {}).get('value', ''), 'enwiki': (b.get('article', {}).get('value', '') or '').rsplit('/', 1)[-1].replace('_', ' ')}
+
+          # ---------- 1 · HAWAII, PUERTO RICO, USVI: the class pull, south of 24°N only ----------
+          say('=' * 78); say('PART 1 — THE ISLANDS THE BOX LEFT OUT (17.5°N to 24°N, country = United States)'); say('=' * 78)
+          seen = {}
+          for kind, classes in KINDS:
+            got = 0
+            for cls in classes:
+              walk = cls.endswith('*'); qid = cls.rstrip('*')
+              path = 'wdt:P31/wdt:P279*' if walk else 'wdt:P31'
+              extra = EXTRA.get(kind, ''); floor = FLOOR.get(kind, 0)
+              q = f'''SELECT ?item ?itemLabel ?coord ?sl ?adminLabel ?site ?article WHERE {{
+                ?item {path} wd:{qid} ; wdt:P17 wd:Q30 ; wdt:P625 ?coord ; wikibase:sitelinks ?sl .
+                {(extra + ' .') if extra else ''}
+                FILTER(?sl >= {floor})
+                FILTER(geof:latitude(?coord) >= 17.5 && geof:latitude(?coord) < 24.0)
+                OPTIONAL {{ ?item wdt:P131 ?admin . }}
+                OPTIONAL {{ ?item wdt:P856 ?site . }}
+                OPTIONAL {{ ?article schema:about ?item ; schema:isPartOf <https://en.wikipedia.org/> . }}
+                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
+              }} ORDER BY ?item LIMIT 10000'''
+              rows = sparql(q)
+              if rows is None and walk: rows = sparql(q.replace('wdt:P31/wdt:P279*', 'wdt:P31'))
+              if rows is None: say(f'  {kind} {qid}: FAILED'); continue
+              for b in rows:
+                r = row_of(b, kind)
+                if r and r['qid'] not in seen: seen[r['qid']] = r; got += 1
+              time.sleep(1.5)
+            say(f'  {kind:26s} {got:5d}')
+          hi = sorted(seen.values(), key=lambda r: (r['kind'], r['name']))
+          with open('wave14-hawaii.csv', 'w', newline='', encoding='utf-8') as f:
+            w = csv.DictWriter(f, fieldnames=list(hi[0].keys()) if hi else ['qid']); w.writeheader(); w.writerows(hi)
+          say(f'\n== {len(hi):,} island rows written (wave14-hawaii.csv)')
+          # The must-pass list for the islands. A miss here is a class gap, exactly like the Alamo was.
+          # The must-pass list for the islands, matched by NAME (a wrong QID would report a false miss; the places
+          # session cannot reach Wikidata to verify ids). A miss here is a class gap, exactly like the Alamo was.
+          MUST = ['Haleakalā National Park', 'Hawaiʻi Volcanoes National Park', 'Pearl Harbor National Memorial', 'Hanauma Bay',
+                  'Diamond Head', 'Waimea Canyon State Park', 'Polynesian Cultural Center', 'ʻIolani Palace',
+                  'Nā Pali Coast State Wilderness Park', 'El Yunque National Forest', 'Castillo San Felipe del Morro',
+                  'Virgin Islands National Park', 'Kīlauea', 'Waikīkī Beach', 'Hāna Highway', 'Akaka Falls State Park']
+          norm = lambda x: re.sub(r'[^a-z0-9]+', ' ', x.lower().replace('ʻ', '').replace('ā', 'a').replace('ī', 'i').replace('ē', 'e').replace('ō', 'o').replace('ū', 'u')).strip()
+          have = {norm(r['name']) for r in hi}
+          def near(w):
+            return any(w == h or (min(len(w), len(h)) >= 12 and (w in h or h in w)) for h in have)
+          say('\n== must-pass (islands), by name:')
+          for n in MUST: say(f"   {'in ' if near(norm(n)) else 'MISSING'}  {n}")
+
+          # ---------- 2 · THE RECALL MISSES, by id ----------
+          say('\n' + '=' * 78); say('PART 2 — RECALL MISSES, PULLED BY WIKIDATA ID (qids.txt)'); say('=' * 78)
+          ids = []
+          if os.path.exists('qids.txt'):
+            s = set()
+            for l in open('qids.txt'):
+              q = l.strip().split(',')[0].split('\t')[0]
+              if re.fullmatch(r'Q\d+', q) and q not in s: s.add(q); ids.append(q)
+          say(f'ids to pull: {len(ids):,}')
+          out = []
+          B = 200
+          for k in range(0, len(ids), B):
+            vals = ' '.join(f'wd:{q}' for q in ids[k:k + B])
+            q = f'''SELECT ?item ?itemLabel ?coord ?sl ?adminLabel ?site ?article (GROUP_CONCAT(DISTINCT ?clsLabel; separator=" | ") AS ?kinds) WHERE {{
+              VALUES ?item {{ {vals} }}
+              ?item wdt:P625 ?coord ; wikibase:sitelinks ?sl .
+              OPTIONAL {{ ?item wdt:P31 ?cls . ?cls rdfs:label ?clsLabel FILTER(LANG(?clsLabel) = "en") }}
+              OPTIONAL {{ ?item wdt:P131 ?admin . }}
+              OPTIONAL {{ ?item wdt:P856 ?site . }}
+              OPTIONAL {{ ?article schema:about ?item ; schema:isPartOf <https://en.wikipedia.org/> . }}
+              SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
+            }} GROUP BY ?item ?itemLabel ?coord ?sl ?adminLabel ?site ?article'''
+            rows = sparql(q)
+            if rows is None: say(f'  batch {k//B}: FAILED'); continue
+            for b in rows:
+              r = row_of(b, (b.get('kinds', {}).get('value', '') or 'unknown').split(' | ')[0][:40])
+              if r: r['instance_of'] = b.get('kinds', {}).get('value', '')[:200]; out.append(r)
+            say(f'  {min(k+B, len(ids)):,} of {len(ids):,}'); time.sleep(2)
+          with open('wave14-recall.csv', 'w', newline='', encoding='utf-8') as f:
+            w = csv.DictWriter(f, fieldnames=list(out[0].keys()) if out else ['qid']); w.writeheader(); w.writerows(out)
+          say(f'\n== {len(out):,} recall rows written (wave14-recall.csv); {len(ids) - len(out):,} ids had no coordinate or no label')
+          # what Wikidata says these places ARE — the classes the pull should have asked for
+          from collections import Counter
+          cnt = Counter(c for r in out for c in r['instance_of'].split(' | ') if c)
+          say('\n== instance-of classes among the recall misses (top 40) — each is a class the class pull never asked for, or asked for and lost:')
+          for c, n in cnt.most_common(40): say(f'   {n:5d}  {c}')
+          open('wave14-summary.txt', 'w').write('\n'.join(L))
+          PY
+
+      - name: Publish (private repository)
+        run: |
+          gh release view wave14 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create wave14 --repo "$GITHUB_REPOSITORY" --title "Wave 1.4 pull" --notes "Hawaii/PR/USVI class pull + recall misses by id. Built by pull-wave14.yml."
+          gh release upload wave14 wave14-hawaii.csv wave14-recall.csv wave14-summary.txt --repo "$GITHUB_REPOSITORY" --clobber
+          echo "published"
